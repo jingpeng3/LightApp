@@ -1,0 +1,231 @@
+@import "tailwindcss";
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+@import "@fontsource/instrument-serif/400.css";
+@import "@fontsource/instrument-serif/400-italic.css";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* 「账本」配色：暖纸、墨色、朱红信号色。深色是石墨底配暖色荧光。 */
+:root {
+  --bg: #efebe2;
+  --panel: #f6f3ec;
+  --surface: #fcfbf8;
+  --raise: #f1ede4;
+  --line: #e3ddd0;
+  --line-strong: #cfc7b6;
+  --ink: #1d1b17;
+  --ink-2: #5e584d;
+  --ink-3: #958d7e;
+  --accent: #d9480f;
+  --accent-soft: #fbe3d6;
+  --danger: #c92a2a;
+  --warn: #b7791f;
+  --ok: #2b8a3e;
+  --shadow: 0 1px 0 rgb(29 27 23 / 0.04), 0 12px 32px -12px rgb(29 27 23 / 0.18);
+  --grain-opacity: 0.35;
+
+  --opt-blue-bg: #dce8f8; --opt-blue-fg: #1c4f8f;
+  --opt-green-bg: #dcefdc; --opt-green-fg: #23602f;
+  --opt-yellow-bg: #f6ecc4; --opt-yellow-fg: #7a5b00;
+  --opt-orange-bg: #fbe0cc; --opt-orange-fg: #94400c;
+  --opt-red-bg: #f8d9d6; --opt-red-fg: #9b1c1c;
+  --opt-purple-bg: #e7defa; --opt-purple-fg: #563199;
+  --opt-pink-bg: #f7dceb; --opt-pink-fg: #8f2462;
+  --opt-cyan-bg: #d4eeef; --opt-cyan-fg: #155e66;
+  --opt-gray-bg: #e8e4dc; --opt-gray-fg: #4f4a41;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg: #121210;
+  --panel: #171714;
+  --surface: #1c1c19;
+  --raise: #24241f;
+  --line: #2c2b26;
+  --line-strong: #3d3b34;
+  --ink: #ece7da;
+  --ink-2: #aaa392;
+  --ink-3: #6f6a5e;
+  --accent: #ff7a3d;
+  --accent-soft: #3a2116;
+  --danger: #ff6b6b;
+  --warn: #f0b429;
+  --ok: #69db7c;
+  --shadow: 0 1px 0 rgb(0 0 0 / 0.3), 0 16px 40px -12px rgb(0 0 0 / 0.6);
+  --grain-opacity: 0.5;
+
+  --opt-blue-bg: #1b2a40; --opt-blue-fg: #8fb8f0;
+  --opt-green-bg: #1b3022; --opt-green-fg: #8ed69b;
+  --opt-yellow-bg: #332c12; --opt-yellow-fg: #ead27a;
+  --opt-orange-bg: #3a2414; --opt-orange-fg: #f5a974;
+  --opt-red-bg: #3b1d1c; --opt-red-fg: #f29b95;
+  --opt-purple-bg: #2b2140; --opt-purple-fg: #c1a6f2;
+  --opt-pink-bg: #3a1d2e; --opt-pink-fg: #eea0c9;
+  --opt-cyan-bg: #15302f; --opt-cyan-fg: #81d4d6;
+  --opt-gray-bg: #2a2925; --opt-gray-fg: #bdb6a6;
+  color-scheme: dark;
+}
+
+@theme {
+  --font-sans: "IBM Plex Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: "IBM Plex Mono", "PingFang SC", ui-monospace, monospace;
+  --font-display: "Instrument Serif", "Songti SC", "STSong", serif;
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-surface: var(--surface);
+  --color-raise: var(--raise);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-danger: var(--danger);
+  --color-warn: var(--warn);
+  --color-ok: var(--ok);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "tnum" 1;
+}
+
+/* 纸张颗粒 */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 100;
+  opacity: var(--grain-opacity);
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.5 0 0 0 0 0.45 0 0 0 0 0.4 0 0 0 0.09 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+[data-theme="dark"] body::before {
+  mix-blend-mode: screen;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* 放进 base 层，否则这条未分层的规则会盖过 Tailwind 的 text-* 工具类 */
+@layer base {
+  input,
+  textarea,
+  select,
+  button {
+    font: inherit;
+    color: inherit;
+  }
+}
+
+/* 实时变更：单元格用操作者的颜色闪一下，2 秒内淡出 */
+@keyframes flash {
+  0% { background-color: color-mix(in oklab, var(--actor) 38%, transparent); box-shadow: inset 0 0 0 1.5px var(--actor); }
+  70% { box-shadow: inset 0 0 0 1.5px color-mix(in oklab, var(--actor) 60%, transparent); }
+  100% { background-color: transparent; box-shadow: inset 0 0 0 1.5px transparent; }
+}
+.flash {
+  animation: flash 2s ease-out forwards;
+}
+@keyframes tag-out {
+  0%, 75% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-3px); }
+}
+.actor-tag {
+  animation: tag-out 2s ease-in forwards;
+}
+@keyframes row-in {
+  from { opacity: 0; transform: translateX(-6px); background-color: color-mix(in oklab, var(--actor, var(--accent)) 22%, transparent); }
+  to { opacity: 1; transform: none; }
+}
+.row-in {
+  animation: row-in 0.6s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes row-out {
+  to { opacity: 0; transform: translateX(12px); filter: grayscale(1); }
+}
+.row-out {
+  animation: row-out 0.45s ease-in forwards;
+  pointer-events: none;
+}
+@keyframes feed-in {
+  from { opacity: 0; transform: translateY(-8px); max-height: 0; }
+  to { opacity: 1; transform: none; max-height: 200px; }
+}
+.feed-in {
+  animation: feed-in 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.rise {
+  animation: rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--ok) 60%, transparent); }
+  100% { box-shadow: 0 0 0 7px transparent; }
+}
+.live-dot {
+  animation: pulse-ring 1.8s ease-out infinite;
+}
+@keyframes slide-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+.drawer {
+  animation: slide-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+}
+.fade-in {
+  animation: fade-in 0.2s ease-out;
+}
+
+/* Markdown 预览 */
+.prose-dt { line-height: 1.7; font-size: 14px; max-width: 72ch; }
+.prose-dt h1, .prose-dt h2, .prose-dt h3 { font-family: var(--font-display); font-weight: 400; line-height: 1.2; margin: 1.4em 0 0.5em; }
+.prose-dt h1 { font-size: 2.1em; }
+.prose-dt h2 { font-size: 1.6em; border-bottom: 1px solid var(--line); padding-bottom: 0.2em; }
+.prose-dt h3 { font-size: 1.3em; }
+.prose-dt p, .prose-dt ul, .prose-dt ol, .prose-dt pre, .prose-dt table, .prose-dt blockquote { margin: 0.8em 0; }
+.prose-dt ul { list-style: disc; padding-left: 1.4em; }
+.prose-dt ol { list-style: decimal; padding-left: 1.4em; }
+.prose-dt a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.prose-dt code { font-family: var(--font-mono); font-size: 0.88em; background: var(--raise); padding: 0.1em 0.35em; border-radius: 3px; }
+.prose-dt pre { background: var(--raise); padding: 12px 14px; border-radius: 6px; overflow: auto; }
+.prose-dt pre code { background: none; padding: 0; }
+.prose-dt blockquote { border-left: 3px solid var(--accent); padding-left: 1em; color: var(--ink-2); }
+.prose-dt table { border-collapse: collapse; }
+.prose-dt th, .prose-dt td { border: 1px solid var(--line); padding: 4px 10px; }
+.prose-dt img { max-width: 100%; }
+.prose-dt hr { border: 0; border-top: 1px solid var(--line); }
