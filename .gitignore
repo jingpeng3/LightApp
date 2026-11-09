@@ -5,3 +5,9 @@ __pycache__/
 dist/
 node_modules/
 src/dt/static/
+*.tsbuildinfo
+.DS_Store
+.idea/
+.vscode/
+*.egg-info/
+build/

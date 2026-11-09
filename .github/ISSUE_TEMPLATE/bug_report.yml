@@ -1,0 +1,28 @@
+name: Bug 报告
+description: dt 的行为和预期不一致
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: 发生了什么
+      description: 运行的 dt 命令或页面操作，以及完整的 JSON 输出
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 复现步骤
+      description: 最好附上能复现问题的表模版 YAML
+  - type: textarea
+    attributes:
+      label: 服务日志
+      description: "$DT_HOME/server.log 里的相关内容"
+      render: text
+  - type: input
+    attributes:
+      label: 环境
+      placeholder: dt 0.1.0 / macOS 15 / Python 3.12 / Chrome 140
