@@ -16,7 +16,7 @@ export interface Field {
   unique?: boolean;
   default?: unknown;
   options?: Option[];
-  config?: { table?: string; multiple?: boolean; accept?: string[] };
+  config?: { table?: string; multiple?: boolean; accept?: string[]; match?: string; self?: boolean };
 }
 
 export interface TableInfo {
@@ -170,18 +170,22 @@ export interface GraphNode {
   updated_at: string;
 }
 
+/** kind=match 是同值关联：match 是字段 config.match 的名字，value 是两条记录相同的值，source 指向唯一的一侧。 */
 export interface GraphEdge {
   source: number;
   target: number;
-  kind: "parent" | "link";
+  kind: "parent" | "link" | "match";
   field?: string;
+  match?: string;
+  value?: string;
 }
 
 export interface TableEdge {
   source: string;
   target: string;
-  kind: "parent" | "link";
+  kind: "parent" | "link" | "match";
   field?: string;
+  match?: string;
   count: number;
 }
 
@@ -193,7 +197,7 @@ export interface GraphData {
   edges: GraphEdge[];
   touches: { actor: string; record_id: number; count: number }[];
   table_edges: TableEdge[];
-  /** 每张表没有任何父子或 link 关系的记录数，统计整个域 */
+  /** 每张表没有任何父子、link 或同值关联的记录数，统计整个域 */
   orphans: Record<string, number>;
   /** 带 at 请求时才有：回放时间轴的范围，at_ts 是 at 那条变更的时间 */
   timeline?: { first_seq: number; last_seq: number; at_ts: string | null };

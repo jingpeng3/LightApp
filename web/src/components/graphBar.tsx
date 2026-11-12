@@ -259,6 +259,7 @@ export function RelatedList({ items, colorOf, selected, onPick }: {
     const from = byId.get(v.from);
     const name = from?.title ?? `#${v.from}`;
     if (v.kind === "parent") return `${name} 的${v.dir === "out" ? "子记录" : "父记录"}`;
+    if (v.kind === "match") return `和 ${name} 的「${v.match}」相同：${v.value}`;
     return v.dir === "out"
       ? `被 ${name} 的「${fieldName(byName[from?.table ?? ""], v.field!)}」引用`
       : `通过「${fieldName(byName[n.table], v.field!)}」引用 ${name}`;
@@ -323,7 +324,7 @@ export function PathBar({ path, onPick, onClose }: { path: PathData; onPick: (r:
           <span key={n.id} className="inline-flex items-center gap-1">
             {e && (
               <span className="font-mono text-[10.5px] text-ink-3">
-                {e.dir === "in" ? "←" : ""}{e.kind === "parent" ? "父子" : fieldName(owner, e.field!)}{e.dir === "out" ? "→" : ""}
+                {e.dir === "in" ? "←" : ""}{e.kind === "parent" ? "父子" : e.kind === "match" ? `=${e.match}` : fieldName(owner, e.field!)}{e.dir === "out" ? "→" : ""}
               </span>
             )}
             <button type="button" onClick={() => onPick(n)} className="max-w-[140px] truncate rounded px-1 hover:bg-raise hover:text-accent">{n.title}</button>

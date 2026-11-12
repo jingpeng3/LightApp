@@ -1,4 +1,4 @@
-"""知识图谱：记录是节点，父子关系和 link 字段是边，再附上每个操作者改过哪些记录。"""
+"""知识图谱：记录是节点，父子关系、link 字段和同值关联（config.match）是边，再附上每个操作者改过哪些记录。"""
 
 import json
 from collections import Counter, defaultdict, deque
@@ -7,6 +7,7 @@ from dt.errors import DtError, not_found
 from dt.model import Table, list_tables
 from dt.query import SYSTEM_COLUMNS, compile_where
 from dt.records import to_output
+from dt.schema import MATCH_TYPES
 
 
 def _title(table: Table, data: dict, record_id: int) -> str:
@@ -66,6 +67,108 @@ def _rows_at(conn, domain: str, by_name: dict[str, Table], at: int) -> list[tupl
     return out
 
 
+# ---------- 同值关联：声明了同一个 config.match 的字段，值相等的记录连边 ----------
+
+MATCH_LIMIT = 50  # 同一范围里一个值匹配到的记录超过这么多就不连，记进 lint 的 ambiguous
+
+
+def _match_value(value):
+    """比较用的值：数字统一成字符串（3.0 和 "3" 相同），文本去掉首尾空白；空值不参与。"""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return str(int(value)) if float(value).is_integer() else str(value)
+    return str(value).strip() or None
+
+
+def _ancestor_tables(table: Table, by_name: dict[str, Table]) -> list[str]:
+    """父表、祖父表……，由近到远，不含自己。"""
+    out = []
+    while table.parent:
+        out.append(table.parent)
+        table = by_name[table.parent]
+    return out
+
+
+def match_edges(tables: list[Table], rows) -> tuple[list[tuple], list[dict]]:
+    """rows 是 (表, 记录 id, 父记录 id, data)。返回 (边, 有歧义的值)，边是 (source, target, match 名, 值)。
+    为了不连出太多边：
+    - 只比较声明了同一个 match 名的不同字段，同一个字段里值相同不连；字段另写了 self: true 时例外，
+      这个字段里值相同的记录在整个域里按 _id 顺序串成一条链（n 条记录 n-1 条边，后建的指向前一条）；
+    - 两条记录只在最近的公共祖先记录之下比较，两张表没有公共祖先表时在整个域里比较；
+    - 同一范围里的同一个值，至少一侧只有一条记录才连，多的一侧指向唯一的一侧；
+      两侧都有多条（多对多）或一共超过 MATCH_LIMIT 条时不连，记进 ambiguous。
+    一对一时，在每个范围里都唯一的那一侧作为被指向方；两侧都唯一时，先建的表（同表时靠前的字段）作为被指向方。"""
+    by_name = {t.name: t for t in tables}
+    groups: dict[str, list[tuple[Table, str]]] = defaultdict(list)
+    selfs: list[tuple[str, Table, str]] = []
+    for t in tables:
+        for f in t.active_fields:
+            if f.type in MATCH_TYPES and f.config.get("match"):
+                groups[f.config["match"]].append((t, f.key))
+                if f.config.get("self"):
+                    selfs.append((f.config["match"], t, f.key))
+    if not selfs and not any(len(m) > 1 for m in groups.values()):
+        return [], []
+    parent_of, by_table = {}, defaultdict(list)
+    for t, rid, pid, data in rows:
+        parent_of[rid] = pid
+        by_table[t.name].append((rid, data))
+
+    def up(rid, steps):
+        for _ in range(steps):
+            rid = parent_of.get(rid)
+        return rid
+
+    edges, ambiguous, seen = [], [], set()
+    for name, members in sorted(groups.items()):
+        for i, (ta, ka) in enumerate(members):
+            for tb, kb in members[i + 1:]:
+                anc_a, anc_b = _ancestor_tables(ta, by_name), _ancestor_tables(tb, by_name)
+                scope = next((x for x in anc_a if x in anc_b), None)
+                buckets: dict[tuple, tuple[list, list]] = defaultdict(lambda: ([], []))
+                for side, t, key, anc in ((0, ta, ka, anc_a), (1, tb, kb, anc_b)):
+                    steps = anc.index(scope) + 1 if scope else 0
+                    for rid, data in by_table[t.name]:
+                        value = _match_value(data.get(key))
+                        owner = up(rid, steps) if scope else 0
+                        if value is not None and owner is not None:
+                            buckets[(owner, value)][side].append(rid)
+                hits = sorted((k, sorted(a), sorted(b)) for k, (a, b) in buckets.items() if a and b)
+                uniq_a, uniq_b = (all(len(x[side]) == 1 for x in hits) for side in (1, 2))
+                prefer_b = uniq_b and not uniq_a
+                for (owner, value), a, b in hits:
+                    if len(a) + len(b) > MATCH_LIMIT or (len(a) > 1 and len(b) > 1):
+                        ambiguous.append({
+                            "match": name, "value": value, "fields": [f"{ta.name}.{ka}", f"{tb.name}.{kb}"],
+                            "reason": "too_many" if len(a) + len(b) > MATCH_LIMIT else "many_to_many",
+                            "scope": owner or None, "records": a + b,
+                        })
+                        continue
+                    one, many = (a, b) if len(a) == 1 and (len(b) > 1 or not prefer_b) else (b, a)
+                    for src in many:
+                        pair = (name, min(src, one[0]), max(src, one[0]))
+                        if src != one[0] and pair not in seen:
+                            seen.add(pair)
+                            edges.append((src, one[0], name, value))
+    for name, t, key in sorted(selfs, key=lambda x: (x[0], x[1].id, x[2])):
+        same: dict[str, list[int]] = defaultdict(list)
+        for rid, data in sorted(by_table[t.name], key=lambda x: x[0]):
+            value = _match_value(data.get(key))
+            if value is not None:
+                same[value].append(rid)
+        for value, ids in sorted(same.items()):
+            if len(ids) > MATCH_LIMIT:
+                ambiguous.append({"match": name, "value": value, "fields": [f"{t.name}.{key}"], "reason": "too_many", "scope": None, "records": ids})
+                continue
+            for prev, rid in zip(ids, ids[1:]):
+                pair = (name, prev, rid)
+                if pair not in seen:
+                    seen.add(pair)
+                    edges.append((rid, prev, name, value))
+    return edges, ambiguous
+
+
 def build(conn, domain: str, domain_id: int, tables: list[str] | None = None, limit: int = 3000, at: int | None = None) -> dict:
     """tables 为 None 表示整个域；记录超过 limit 时只保留最近更新的。table_edges 和 orphans 总是统计整个域。
     at 给出变更 seq 时，返回那一刻的图（由 dt_changes 还原），用于历史回放。"""
@@ -109,6 +212,10 @@ def build(conn, domain: str, domain_id: int, tables: list[str] | None = None, li
             in_scope += 1
             if len(picked) < limit:
                 picked.append((table, r, data))
+    matches, _ = match_edges(all_tables, ((t, r["id"], r["parent_id"], data) for t, r, data in rows))
+    for source, target, name, _ in matches:
+        table_edges[(table_of[source], table_of[target], "match", name)] += 1
+        linked |= {source, target}
     orphans = Counter(table.name for table, r, _ in rows if r["id"] not in linked)
 
     nodes, edges = [], []
@@ -122,6 +229,7 @@ def build(conn, domain: str, domain_id: int, tables: list[str] | None = None, li
                 for target in _ids(data.get(f.key)):
                     if target in ids:
                         edges.append({"source": r["id"], "target": target, "kind": "link", "field": f.key})
+    edges += [Edge(s, t, "match", name, value).to_dict() for s, t, name, value in matches if s in ids and t in ids]
 
     touches = _touches(conn, domain, sorted(scope), ids, at)
 
@@ -133,7 +241,7 @@ def build(conn, domain: str, domain_id: int, tables: list[str] | None = None, li
         "edges": edges,
         "touches": touches,
         "table_edges": [
-            {"source": s, "target": t, "kind": k, **({"field": f} if f else {}), "count": n}
+            {"source": s, "target": t, "kind": k, **({"match" if k == "match" else "field": f} if f else {}), "count": n}
             for (s, t, k, f), n in table_edges.items()
         ],
         "orphans": dict(orphans),
@@ -154,19 +262,25 @@ class Edge:
     __slots__ = ("source", "target", "kind", "field", "owner")
 
     def __init__(self, source: int, target: int, kind: str, field: str | None = None, owner: str | None = None):
+        """kind 为 match 时 field 是 match 名，owner 是相同的值。"""
         self.source, self.target, self.kind, self.field, self.owner = source, target, kind, field, owner
 
     @property
     def key(self) -> str:
-        """和页面「连线」开关一致：parent 或 link:<持有表>.<字段>。"""
+        """和页面「连线」开关一致：parent、link:<持有表>.<字段> 或 match:<名字>。"""
+        if self.kind == "match":
+            return f"match:{self.field}"
         return "parent" if self.kind == "parent" else f"link:{self.owner}.{self.field}"
 
     def to_dict(self) -> dict:
+        if self.kind == "match":
+            return {"source": self.source, "target": self.target, "kind": "match", "match": self.field, "value": self.owner}
         return {"source": self.source, "target": self.target, "kind": self.kind, **({"field": self.field} if self.field else {})}
 
 
 class Index:
-    """一个域里全部记录和边。link 指向不存在（或不在目标表里）的记录时记进 dangling，不建边。"""
+    """一个域里全部记录和边。link 指向不存在（或不在目标表里）的记录时记进 dangling，不建边；
+    同值关联里有歧义、没有连边的值记进 ambiguous。"""
 
     def __init__(self, conn, domain_id: int):
         self.tables = list_tables(conn, domain_id)
@@ -193,6 +307,9 @@ class Index:
                         self._add(Edge(rid, target, "link", f.key, table.name))
                     else:
                         self.dangling.append({**self.brief(rid), "field": f.key, "target": target, "target_table": f.config["table"]})
+        matches, self.ambiguous = match_edges(self.tables, ((t, rid, r["parent_id"], data) for rid, (t, r, data) in self.recs.items()))
+        for source, target, name, value in matches:
+            self._add(Edge(source, target, "match", name, value))
 
     def _add(self, e: Edge):
         self.out[e.source].append(e)
@@ -300,13 +417,13 @@ DIRECTIONS = ("both", "out", "in")
 
 
 def parse_kinds(value: str | None) -> set | None:
-    """逗号分隔：parent、link（全部 link 字段）、link:<表>.<字段>。省略表示全部。"""
+    """逗号分隔：parent、link（全部 link 字段）、link:<表>.<字段>、match（全部同值关联）、match:<名字>。省略表示全部。"""
     if value is None:
         return None
     kinds = {x.strip() for x in value.split(",") if x.strip()}
-    bad = [k for k in kinds if k not in ("parent", "link") and not k.startswith("link:")]
+    bad = [k for k in kinds if k not in ("parent", "link", "match") and not k.startswith(("link:", "match:"))]
     if bad:
-        raise DtError("invalid_query", f"不认识的连线类型 {bad}", "可用：parent、link、link:<表>.<字段>")
+        raise DtError("invalid_query", f"不认识的连线类型 {bad}", "可用：parent、link、link:<表>.<字段>、match、match:<名字>")
     return kinds
 
 
@@ -435,7 +552,7 @@ def path(conn, domain_id: int, source: int, target: int, direction: str = "both"
 
 
 def lint(conn, domain_id: int, tables: list[str] | None = None, limit: int = 200) -> dict:
-    """悬空引用（link 指向的记录不存在）和孤立记录（没有父子也没有引用关系）。"""
+    """悬空引用（link 指向的记录不存在）、孤立记录（没有任何关联）、依赖环，以及同值关联里有歧义没连上的值。"""
     idx = Index(conn, domain_id)
     if tables is not None:
         missing = set(tables) - set(idx.by_name)
@@ -444,6 +561,10 @@ def lint(conn, domain_id: int, tables: list[str] | None = None, limit: int = 200
     keep = (lambda name: True) if tables is None else (lambda name: name in tables)
     dangling = [d for d in idx.dangling if keep(d["table"])]
     orphans = [idx.brief(rid) for rid, (t, _, _) in idx.recs.items() if keep(t.name) and not idx.out[rid] and not idx.inn[rid]]
+    ambiguous = [
+        {**a, "records": [idx.brief(rid) for rid in a["records"][:20]], "record_count": len(a["records"])}
+        for a in idx.ambiguous if any(keep(f.partition(".")[0]) for f in a["fields"])
+    ]
     # 自引用的 link 字段（如 task.needs → task）通常表示依赖，成环时依赖永远满足不了
     cycles = [
         {"field": f"{t.name}.{f.key}", "records": [idx.brief(rid) for rid in ring]}
@@ -455,6 +576,7 @@ def lint(conn, domain_id: int, tables: list[str] | None = None, limit: int = 200
         "dangling": {"total": len(dangling), "items": dangling[:limit]},
         "orphans": {"total": len(orphans), "items": orphans[:limit]},
         "cycles": {"total": len(cycles), "items": cycles[:limit]},
+        "ambiguous": {"total": len(ambiguous), "items": ambiguous[:limit]},
     }
 
 
@@ -649,7 +771,7 @@ def _field_label(table: Table | None, key: str) -> str:
 
 
 def render(fmt: str, conn, domain_id: int, nodes: list[dict], edges: list[dict]) -> str:
-    """把接口返回的 nodes / edges 画成文本。节点按表分组，父子边实线，link 边虚线并标字段名。"""
+    """把接口返回的 nodes / edges 画成文本。节点按表分组，父子边实线，link 边虚线并标字段名，同值关联标「= 名字」。"""
     by_name = {t.name: t for t in list_tables(conn, domain_id)}
     table_of = {n["id"]: n["table"] for n in nodes}
     groups: dict[str, list[dict]] = defaultdict(list)
@@ -657,6 +779,8 @@ def render(fmt: str, conn, domain_id: int, nodes: list[dict], edges: list[dict])
         groups[n["table"]].append(n)
 
     def edge_label(e: dict) -> str:
+        if e["kind"] == "match":
+            return f"= {e['match']}"
         return "" if e["kind"] == "parent" else _field_label(by_name.get(table_of.get(e["source"], "")), e["field"])
 
     if fmt == "mermaid":

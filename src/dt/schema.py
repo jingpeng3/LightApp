@@ -16,6 +16,7 @@ TABLE_KEYS = {"name", "label", "description", "relation", "on_delete", "fields",
 FIELD_KEYS = {"key", "label", "description", "type", "required", "unique", "default", "options", "config"}
 RELATIONS = ("one_to_many", "one_to_one")
 ON_DELETE = ("cascade", "restrict")
+MATCH_TYPES = ("text", "number", "url", "email")  # 能声明同值关联（config.match）的字段类型
 
 
 def _err(message: str, hint: str | None = None) -> DtError:
@@ -143,11 +144,23 @@ def _config(ftype: str, raw, where: str) -> dict:
     raw = raw or {}
     if not isinstance(raw, dict):
         raise _err(f"{where} 的 config 必须是对象")
-    allowed = {"link": {"table", "multiple"}, "attachment": {"multiple", "accept"}}.get(ftype, set())
+    allowed = {"link": {"table", "multiple"}, "attachment": {"multiple", "accept"}}.get(ftype, {"match", "self"} if ftype in MATCH_TYPES else set())
     unknown = set(raw) - allowed
     if unknown:
-        raise _err(f"{where} 的 config 有未知属性 {sorted(unknown)}", ("可用：" + "、".join(sorted(allowed))) if allowed else "该类型没有 config")
+        hint = ("可用：" + "、".join(sorted(allowed))) if allowed else "该类型没有 config"
+        if "match" in unknown:
+            hint += "；match 只能用在 " + "、".join(MATCH_TYPES) + " 字段上"
+        raise _err(f"{where} 的 config 有未知属性 {sorted(unknown)}", hint)
     out = {}
+    if raw.get("match") is not None:
+        out["match"] = _name(raw["match"], f"{where} 的 config.match")
+    if raw.get("self") is not None:
+        if not isinstance(raw["self"], bool):
+            raise _err(f"{where} 的 config.self 必须是 true 或 false")
+        if "match" not in out:
+            raise _err(f"{where} 的 config.self 要和 match 一起写", "例如 config: {match: sn, self: true}")
+        if raw["self"]:
+            out["self"] = True
     if "multiple" in raw:
         if not isinstance(raw["multiple"], bool):
             raise _err(f"{where} 的 config.multiple 必须是 true 或 false")
@@ -368,6 +381,10 @@ def _plan_field(table: Table, old: Field, new: Field, steps: list):
             conv = True
         if old.config.get("accept") != new.config.get("accept"):
             changes.append(f"accept: {old.config.get('accept')} → {new.config.get('accept')}（不影响已有附件）")
+        if old.config.get("match") != new.config.get("match"):
+            changes.append(f"同值关联 match: {old.config.get('match')} → {new.config.get('match')}（图谱的边随之重算，不改数据）")
+        if bool(old.config.get("self")) != bool(new.config.get("self")):
+            changes.append(f"同字段同值关联 self: {bool(old.config.get('self'))} → {bool(new.config.get('self'))}（图谱的边随之重算，不改数据）")
     for attr in ("label", "description", "default", "required", "unique"):
         if getattr(old, attr) != getattr(new, attr):
             changes.append(f"{attr}: {getattr(old, attr)!r} → {getattr(new, attr)!r}")

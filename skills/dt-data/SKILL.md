@@ -76,21 +76,22 @@ dt history -D proj_a --table task --id 12       # 这条记录的变更历史
 
 ### 5. 查关联（需要时）
 
-记录之间的关系有两种：父子（`_parent_id`）和 link 字段。`dt graph` 在整个域上沿这些关系查找，不用自己一层层 query。
+记录之间的关系有三种：父子（`_parent_id`）、link 字段，以及同值关联（表结构里声明了同一个 `config.match` 的字段值相同，由 dt-schema 设置，不用手动写）。`dt graph` 在整个域上沿这些关系查找，不用自己一层层 query。
 
 ```bash
 dt graph related 12 -D proj_a                              # 和 12 直接相连的记录（1 跳）
 dt graph related 12 -D proj_a --depth all --format table   # 能连到的所有记录
 dt graph related 12 -D proj_a --direction in --kinds link  # 谁引用了 12
+dt graph related 12 -D proj_a --kinds match                # 和 12 编号相同的记录（同值关联）
 dt graph related 12 -D proj_a --direction out --kinds link:task.needs --depth all   # 12 依赖的整条链
 dt graph related -D proj_a --by codex --depth 0            # codex 写过的记录
 dt graph path 12 7 -D proj_a                               # 两条记录之间最短的关联路径
-dt graph lint -D proj_a                                    # 悬空引用、孤立记录、依赖环
+dt graph lint -D proj_a                                    # 悬空引用、孤立记录、依赖环、同值关联里有歧义没连上的值
 dt graph hubs -D proj_a --format table                     # 连接最多的记录
 ```
 
 - `--direction`：`out` 沿父→子、引用方→被引用方走；`in` 反过来；默认 `both`。
-- `--kinds`：`parent`、`link`（全部 link 字段）、`link:<表>.<字段>`，逗号分隔。`--tables` 限定只经过哪些表。
+- `--kinds`：`parent`、`link`（全部 link 字段）、`link:<表>.<字段>`、`match`（全部同值关联）、`match:<名字>`，逗号分隔。同值关联的边带 `match`（名字）和 `value`（相同的值），方向是从多的一侧指向唯一的一侧。`--tables` 限定只经过哪些表。
 - 返回的每条记录带 `depth`（离起点几跳）和 `via`（经哪条边、从哪条记录到达）。超过 `--limit`（默认 500）时 `truncated` 为 true，缩小 depth 或加 kinds、tables 再查。
 
 把关联记录当上下文用时，直接带上数据、按条件筛，不用再逐条 `rec get`：
