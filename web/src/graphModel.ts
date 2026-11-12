@@ -23,14 +23,17 @@ export interface SimNode {
   fy?: number;
 }
 
-/** 边。kind=link 时 field 是 link 字段，owner 是持有该字段的表；born / dying 用来做闪烁和淡出。 */
+/** 边。kind=link 时 field 是 link 字段，owner 是持有该字段的表；kind=match 时 match 是同值关联的名字，value 是相同的值；
+ * born / dying 用来做闪烁和淡出。 */
 export interface SimLink {
   key: string;
   source: string | SimNode;
   target: string | SimNode;
-  kind: "parent" | "link" | "actor";
+  kind: "parent" | "link" | "match" | "actor";
   field?: string;
   owner?: string;
+  match?: string;
+  value?: string;
   count?: number;
   curvature?: number;
   born?: number;
@@ -66,11 +69,11 @@ export const endId = (e: string | SimNode) => (typeof e === "string" ? e : e.id)
 const rid = (id: number) => `r:${id}`;
 const key = (kind: string, s: string, t: string, field = "") => `${kind}:${s}>${t}:${field}`;
 
-/** 边在「连线」开关里的名字：parent、actor、link:<表>.<字段>。 */
-export const edgeFilterKey = (l: SimLink) => (l.kind === "link" ? `link:${l.owner}.${l.field}` : l.kind);
+/** 边在「连线」开关里的名字：parent、actor、link:<表>.<字段>、match:<名字>。 */
+export const edgeFilterKey = (l: SimLink) => (l.kind === "link" ? `link:${l.owner}.${l.field}` : l.kind === "match" ? `match:${l.match}` : l.kind);
 
 /** 接口返回的边对应的 SimLink.key。 */
-export const edgeKey = (e: GraphEdge) => key(e.kind, rid(e.source), rid(e.target), e.field);
+export const edgeKey = (e: GraphEdge) => key(e.kind, rid(e.source), rid(e.target), e.field ?? e.match);
 
 export function fromData(data: Pick<GraphData, "seq" | "total" | "truncated" | "nodes" | "edges" | "touches">): Model {
   const m: Model = { seq: data.seq, total: data.total, truncated: data.truncated, nodes: new Map(), edges: new Map(), touches: new Map(), actors: new Map() };
@@ -80,8 +83,8 @@ export function fromData(data: Pick<GraphData, "seq" | "total" | "truncated" | "
     m.nodes.set(rid(n.id), { ...n, id: rid(n.id), rid: n.id, kind: "record" });
   }
   for (const e of data.edges) {
-    const s = rid(e.source), t = rid(e.target);
-    m.edges.set(key(e.kind, s, t, e.field), { key: key(e.kind, s, t, e.field), source: s, target: t, kind: e.kind, field: e.field, owner: tableOf.get(e.source) });
+    const k = edgeKey(e);
+    m.edges.set(k, { key: k, source: rid(e.source), target: rid(e.target), kind: e.kind, field: e.field, owner: tableOf.get(e.source), match: e.match, value: e.value });
   }
   for (const t of data.touches) touch(m, t.actor, rid(t.record_id), t.count);
   return m;
@@ -109,6 +112,13 @@ export function relatesTo(m: Model, c: Change, byName: Record<string, TableInfo>
   const rec = c.after;
   if (!rec) return false;
   return m.nodes.has(rid(rec._parent_id ?? -1)) || linkTargets(byName[c.table_name], rec).some((x) => m.nodes.has(x.target));
+}
+
+/** 这条变更会不会改变同值关联：新增的记录、或改动的字段声明了 config.match。同值关联由接口计算，命中时重新拉图。 */
+export function touchesMatch(c: Change, table: TableInfo | undefined) {
+  const keys = (table?.fields ?? []).filter((f) => f.config?.match).map((f) => f.key);
+  if (!keys.length || c.op === "delete") return false;
+  return keys.some((k) => (c.op === "insert" ? c.after?.[k] != null : JSON.stringify(c.before?.[k]) !== JSON.stringify(c.after?.[k])));
 }
 
 export interface Effect {

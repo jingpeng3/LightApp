@@ -4,7 +4,7 @@ import type { Change, GraphData, PathData, RelatedNode, TableInfo } from "../api
 import { api, ApiError } from "../api";
 import { drawDragLine, drawNode, linkColor, linkWidth, PULSE_MS, radius, readPalette, solid, TABLE_COLORS, type DrawCtx } from "../graphDraw";
 import {
-  applyChange, curve, edgeKey, endId, FADE_MS, fromData, purge, readFilters, relatesTo, visible, writeFilters,
+  applyChange, curve, edgeKey, endId, FADE_MS, fromData, purge, readFilters, relatesTo, touchesMatch, visible, writeFilters,
   type Filters, type Model, type SimLink, type SimNode,
 } from "../graphModel";
 import { useChanges } from "../live";
@@ -18,7 +18,7 @@ import { Empty, useApp } from "./ui";
 const LIMIT = 3000;
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
-/** 表概览：表是节点，父子和 link 字段是边，边的条数来自接口的 table_edges。 */
+/** 表概览：表是节点，父子、link 字段和同值关联是边，边的条数来自接口的 table_edges；同值关联只画有边的表对。 */
 function tableGraph(tables: TableInfo[], data: GraphData | null, reuse: Map<string, SimNode>) {
   const count = new Map((data?.table_edges ?? []).map((e) => [`${e.kind}:${e.source}>${e.target}:${e.field ?? ""}`, e.count]));
   const nodes = tables.map((t) => {
@@ -39,6 +39,9 @@ function tableGraph(tables: TableInfo[], data: GraphData | null, reuse: Map<stri
       const k = `link:${t.name}>${f.config.table}:${f.key}`;
       links.push({ key: k, source: `t:${t.name}`, target: `t:${f.config.table}`, kind: "link", field: f.key, owner: t.name, count: count.get(k) ?? 0 });
     }
+  }
+  for (const e of data?.table_edges ?? []) {
+    if (e.kind === "match") links.push({ key: `match:${e.source}>${e.target}:${e.match}`, source: `t:${e.source}`, target: `t:${e.target}`, kind: "match", match: e.match, count: e.count });
   }
   curve(links);
   return { nodes, links };
@@ -67,8 +70,16 @@ export function GraphView({ qs }: { qs: string }) {
   const linkFields = tables
     .filter((t) => !scope || scope.includes(t.name))
     .flatMap((t) => t.fields.filter((x) => x.type === "link").map((x) => ({ key: `link:${t.name}.${x.key}`, label: `${tableLabel(t, t.name)}.${fieldLabel(x)}` })));
+  // 同值关联按 config.match 的名字开关，至少两个字段声明了同一个名字、或字段写了 self 才有边
+  const matchFields = tables
+    .filter((t) => !scope || scope.includes(t.name))
+    .flatMap((t) => t.fields.filter((x) => x.config?.match));
+  const matchNames = matchFields.map((x) => x.config!.match!);
+  const matchKinds = [...new Set(matchNames.filter((x, i) => matchNames.indexOf(x) !== i || matchFields[i].config?.self))]
+    .map((x) => ({ key: `match:${x}`, label: `同值 · ${x}` }));
+  const edgeKinds = [...linkFields, ...matchKinds];
   // 焦点沿「连线」里打开的边遍历；全部打开时不传 kinds
-  const traversal = ["parent", ...linkFields.map((x) => x.key)];
+  const traversal = ["parent", ...edgeKinds.map((x) => x.key)];
   const walk = traversal.filter((k) => !f.off.includes(k));
   const kinds = walk.length === traversal.length ? undefined : walk.join(",");
   // 回放时图由 dt_changes 还原，焦点（接口按现在的数据算）不生效
@@ -190,11 +201,12 @@ export function GraphView({ qs }: { qs: string }) {
     if (pending.current) return void pending.current.push(c);
     const m = model.current;
     if (!m) return;
-    // 焦点模式只含关联记录：相关的变更先在图上表现出来，再按接口重算关联范围
+    // 焦点模式只含关联记录：相关的变更先在图上表现出来，再按接口重算关联范围；同值关联由接口计算，有变化时也重拉
+    const matched = touchesMatch(c, byName[c.table_name]);
     if (focusing) {
-      if (!relatesTo(m, c, byName)) return;
+      if (!matched && !relatesTo(m, c, byName)) return;
       refetch();
-    }
+    } else if (matched) refetch();
     show(m, c);
   });
 
@@ -536,6 +548,7 @@ export function GraphView({ qs }: { qs: string }) {
     const n = tablesView ? ` · ${l.count} 条` : "";
     if (l.kind === "actor") return esc(`${actorName(endId(l.source).slice(2))} 写入 ${l.count} 次`);
     if (l.kind === "parent") return esc(`父子${n}`);
+    if (l.kind === "match") return esc(`同值 ${l.match}${tablesView ? "" : ` = ${l.value}`}${n}`);
     const t = byName[l.owner!];
     const fd = t?.fields.find((x) => x.key === l.field);
     return esc(`${tableLabel(t, l.owner!)}.${fd ? fieldLabel(fd) : l.field}${n}`);
@@ -557,7 +570,7 @@ export function GraphView({ qs }: { qs: string }) {
         setF={setF}
         stats={stats}
         actors={actors}
-        linkFields={linkFields}
+        linkFields={edgeKinds}
         colorOf={colorOf}
         focusTitle={f.focus != null ? m?.nodes.get(`r:${f.focus}`)?.title ?? null : null}
         focusCount={focusing && related ? related.length - 1 : null}
@@ -581,7 +594,7 @@ export function GraphView({ qs }: { qs: string }) {
             nodeCanvasObject={(n, ctx, scale) => drawNode(n, ctx, scale, draw)}
             linkColor={(l) => linkColor(l, draw)}
             linkWidth={(l) => linkWidth(l, draw, tablesView)}
-            linkLineDash={(l) => (l.kind === "link" ? [3, 2] : null)}
+            linkLineDash={(l) => (l.kind === "link" ? [3, 2] : l.kind === "match" ? [1, 2] : null)}
             linkCurvature="curvature"
             linkLabel={linkLabel}
             linkDirectionalArrowLength={(l) => (l.kind === "link" ? (tablesView ? 6 : 3.5) : 0)}

@@ -129,6 +129,7 @@ export function linkColor(l: SimLink, d: DrawCtx) {
   const k = faded(l, d) ? 0.15 : 1;
   if (l.kind === "actor") return alpha(solid(actorColor(endId(l.source).slice(2)), p), 0.35 * k);
   if (l.kind === "link") return alpha(d.tableColor(l.owner), 0.6 * k);
+  if (l.kind === "match") return alpha(p.ink2, 0.5 * k);
   return alpha(p.ink3, 0.55 * k);
 }
 

@@ -1,6 +1,6 @@
 ---
 name: dt-schema
-description: 用 dt CLI 设计和修改动态表格的模版（表结构）：建域、建表、加字段、下拉选项、附件字段、父子子表（多级嵌套）、表间引用。用户说「建一个项目/域」「建一张表」「设计任务表/日志表/看板表」「加个字段」「改下拉选项」「加子表」「改表结构」时使用。只操作数据（增删改查记录）时用 dt-data。
+description: 用 dt CLI 设计和修改动态表格的模版（表结构）：建域、建表、加字段、下拉选项、附件字段、父子子表（多级嵌套）、表间引用、同值自动关联（config.match）。用户说「建一个项目/域」「建一张表」「设计任务表/日志表/看板表」「加个字段」「改下拉选项」「加子表」「改表结构」「让编号相同的记录自动关联」时使用。只操作数据（增删改查记录）时用 dt-data。
 ---
 
 # dt 模版设计
@@ -41,6 +41,7 @@ tables:                   # 每一项都是一个完整的表模版（见下面�
     description: 测试或线上发现的缺陷
     fields:
       - {key: task, type: link, config: {table: task, multiple: true}}   # link 只能引用同一个域里的表
+      - {key: ticket_no, type: text, config: {match: ticket_no}}         # 和其他声明了 match: ticket_no 的字段值相同时自动关联
 ```
 
 ```bash
@@ -100,7 +101,48 @@ children:
 - 子记录属于父记录、随父记录删除（日志、明细、附属信息）：子表，`one_to_many`。
 - 每条父记录只有一份的扩展信息（看板位置、统计）：子表，`one_to_one`。
 - 两张独立的表互相引用（Bug 关联任务）：`link` 字段，`config: {table: task, multiple: true}`。
+- 两张表各自存着同一个业务编号（服务器的问题组号和问题组表的组号、任务编号和驳回记录里的来源任务），又不想手动维护 link：在两边的字段上声明同一个**同值关联**名，见下一节。
 - 给已有表加子表：单独 apply 一个带 `parent` 的 spec，例如 `{name: task_tag, parent: task, fields: [...]}`。
+
+## 同值关联（config.match）
+
+值相同的记录在知识图谱里自动连边，不用写 link：
+
+```yaml
+tables:
+  - name: ts_run
+    children:
+      - name: server
+        fields:
+          - {key: group_no, type: text, config: {match: group_no}, description: 所属问题组号，如 1.1}
+      - name: problem_group
+        fields:
+          - {key: group_no, type: text, unique: true, config: {match: group_no}, description: 问题组号}
+```
+
+- 名字（`match` 的值）相同的字段互相比较，字段 key 可以不同；名字规则同字段 key。只有 `text` `number` `url` `email` 能声明。
+- 只在**最近的公共父记录**下比较：上例只连同一个 `ts_run` 里的 server 和 problem_group，不同轮次的 `1.1` 不会连在一起。两张表没有公共父表时在整个域里比较。
+- 同一个字段里值相同不连（两台 server 都在 1.1 组不算关联）。例外是 `self: true`，见下。
+- 同一范围里一个值至少有一侧只有一条记录才连，多的一侧指向唯一的一侧；两侧都有多条（多对多）或一共超过 50 条时不连，`dt graph lint -D <域>` 的 `ambiguous` 会列出来。
+- 边在查询时现算，加、改、去掉 `match` 都不改数据，也不是破坏性变更。
+
+**同一个字段里的同值**：同一个实体在一张表里出现多次（同一台机器的 SN 出现在多次排查里），要把这几条记录连起来时，在字段上加 `self: true`：
+
+```yaml
+- {key: sn, type: text, config: {match: sn, self: true}, description: 服务器 SN}
+```
+
+- 这个字段里值相同的记录在**整个域**里比较（不受公共父记录限制），按 `_id` 顺序串成一条链：n 条记录只连 n-1 条边，后建的指向前一条，不两两全连。
+- 一个值超过 50 条时不连，记进 `lint` 的 `ambiguous`（`reason: too_many`）。
+- `self` 必须和 `match` 一起写；同名的其他字段仍按上面的规则和它比较。
+- 只给「同一个值就是同一个实体」的字段加（SN、工单号）。组号、状态这类同值只表示同组的字段不要加。
+
+怎么用好：
+
+- 只给**标识实体的编号**声明：组号、工单号、SN、任务编号。状态、类型、负责人、日期、分数这类很多记录都会取到同一个值的字段不要声明，连出来的边没有意义，还会被多对多规则挡掉。
+- 被指向的那一侧（实体表）的字段最好加 `unique: true`，保证每个值只有一条。
+- 字段里是逗号分隔的多个值（如 `ms-a,ms-b`）时不支持，需要关联就拆成子表或改用 link。
+- apply 之后跑一次 `dt graph lint -D <域>`，看 `ambiguous` 是否为空；不为空说明数据里有重复编号，或者这个字段不适合声明。
 
 ## 其他命令
 

@@ -423,12 +423,13 @@ enabled: true
 | 操作者节点 | `dt_changes.actor` | 方块，按操作者颜色；默认隐藏，在「连线」里打开 |
 | 父子边 | `_parent_id`，父 → 子 | 实线 |
 | 引用边 | link 字段的值，持有方 → 被引用方 | 虚线加箭头，悬停显示字段名 |
+| 同值边 | 声明了同一个 `config.match` 的字段值相同，多的一侧 → 唯一的一侧 | 点线，悬停显示名字和值 |
 | 操作边 | 操作者对记录做过的 insert / update，操作者 → 记录 | 细线，悬停显示次数 |
 
 ### 两个视图
 
 - **记录图**：记录和操作者作为节点。域内记录不超过 1500 条时默认进入这个视图。
-- **表概览**：表作为节点，父子和 link 关系作为边，边上标注条数；顶部显示孤立记录总数，悬停表节点显示该表的孤立数。超过 1500 条时默认进入；点一张表进入只含这张表的记录图。
+- **表概览**：表作为节点，父子、link 和同值关联作为边，边上标注条数；顶部显示孤立记录总数，悬停表节点显示该表的孤立数。超过 1500 条时默认进入；点一张表进入只含这张表的记录图。
 
 ### 实时变化
 
@@ -447,7 +448,7 @@ enabled: true
 - 表：图例里点表切换范围，范围变化时重新拉图。
 - 焦点：搜索（可直接输入 `_id`）或双击节点设为中心。由 `/graph/related` 在整个域上计算，不受 3000 条快照的限制；深度 1–3 跳或「全部」，方向可选双向、它指向的、指向它的；只沿「连线」里打开的父子和 link 边、在当前表范围内遍历。右侧列出关联记录，按跳数分组，说明经哪条边到达。关联记录有变更时静默重拉。
 - 路径：选中一个节点后 Shift+单击另一个节点，调用 `/graph/path`，路径上的边高亮，顶部显示每一步。
-- 连线：父子、每个 link 字段、操作边分别开关。
+- 连线：父子、每个 link 字段、每个同值关联、操作边分别开关。
 - 操作者：只显示选中操作者 insert / update 过的记录。
 - 时间：只显示最近 1 小时 / 24 小时更新过的记录。
 - 筛选状态写在地址栏，例如 `#teams/@graph?tables=task,agent&focus=12&depth=2&actors=claude`。
@@ -478,8 +479,8 @@ enabled: true
 - `tables` 省略表示整个域；`limit` 默认 3000、最大 10000，超过时只保留最近更新的记录，`truncated` 为 true。`limit=0` 只返回 `table_edges`、`orphans` 和 `total`，给表概览用。
 - `edges` 和 `touches` 只包含两端都在 `nodes` 里的边；`table_edges` 和 `orphans`（每张表没有任何父子或 link 关系的记录数）统计整个域。
 - `at=<seq>` 返回那一刻的图：每条记录取 seq 不超过 `at` 的最后一次变更的 `after`，最后一次是 delete 的跳过；`touches` 也只算到 `at`。按当前表结构解释旧数据，已删除的表不出现。返回的 `seq` 等于 `at`，另带 `timeline: {first_seq, last_seq, at_ts}`。
-- `format=mermaid|dot` 时（`/graph`、`related`、`path` 都支持）返回 `{format, text}`：节点按表分组，父子边实线，link 边虚线并标字段名。
-- 下面这些接口都在整个域上计算，不受 `limit` 截断影响。连线类型 `kinds` 逗号分隔：`parent`、`link`（全部 link 字段）、`link:<表>.<字段>`；操作者边不参与遍历。`direction=out` 沿父→子、引用方→被引用方走，`in` 反过来。
+- `format=mermaid|dot` 时（`/graph`、`related`、`path` 都支持）返回 `{format, text}`：节点按表分组，父子边实线，link 边虚线并标字段名，同值边标 `= 名字`。
+- 下面这些接口都在整个域上计算，不受 `limit` 截断影响。连线类型 `kinds` 逗号分隔：`parent`、`link`（全部 link 字段）、`link:<表>.<字段>`、`match`（全部同值关联）、`match:<名字>`；操作者边不参与遍历。`direction=out` 沿父→子、引用方→被引用方走，`in` 反过来。
 
 `GET /api/d/{domain}/graph/related?ids=12&depth=all&direction=in&kinds=link`
 
@@ -496,8 +497,23 @@ enabled: true
 - `where`（查询 DSL 的 JSON）和 `since`（seq）只筛选返回的记录，不影响遍历，起点总是保留；`edges` 只含筛选后两端都在的边。`where` 用到的字段在某张表里不存在时，这张表的记录都算不满足，所有表都没有时报 `invalid_query`。`since` 给出时每个节点带 `changed: {count, last_seq, last_ts, ops, actors, fields}`（起点没变化时为 null）。
 - `fields=*` 时每个节点带 `data`（和 `rec get` 一样的完整记录），`fields=a,b` 只带这些 key。
 - `path` 返回 `{found, nodes, edges}`，`edges` 按路径顺序，每条带 `dir`。
-- `lint` 返回 `dangling`（link 指向的记录不存在，通常是绕过接口写入的老数据）、`orphans`（没有父子也没有 link 关系）和 `cycles`（自引用 link 字段里成环的记录，含自己依赖自己），各自 `{total, items}`。
+- `lint` 返回 `dangling`（link 指向的记录不存在，通常是绕过接口写入的老数据）、`orphans`（没有父子、link 或同值关联）、`cycles`（自引用 link 字段里成环的记录，含自己依赖自己）和 `ambiguous`（同值关联里没有连边的值，见下），各自 `{total, items}`。
 - `impact` 返回 `record`、`cascade`（会一起删的子记录）、`unlink`（会被去掉引用的记录和字段）、`blocked`（restrict 子表挡住删除时非空）。
+
+### 同值关联
+
+字段 config 里写 `match: <名字>`（只限 `text`、`number`、`url`、`email`），声明了同一个名字的不同字段，值相同的记录之间连 `match` 边。边和父子、link 一样在查询时现算，不落库；增删改 `match` 只是非破坏性的 `update_field`。
+
+为了不连出太多边：
+
+1. **范围**：两个字段所在表的最近公共祖先表存在时，只比较同一条祖先记录下的记录；不存在时在整个域里比较。
+2. **同字段不连**：只比较不同字段，同一个字段里值相同不算关联。字段另写 `self: true` 时例外：这个字段里同值的记录在整个域里按 `_id` 排序串成一条链，后建的指向前一条，n 条记录 n-1 条边；一个值超过 50 条时不连，记 `too_many`。适合 SN 这类同一个值就是同一个实体、会在多次记录里重复出现的字段。
+3. **一对多**：同一范围里的同一个值，一侧一条、另一侧多条时，多的一侧各连一条边指向唯一的那条；两侧各一条时，在每个范围里都唯一的那一侧作为被指向方（都唯一时取先建的表，同一张表时取靠前的字段）。两侧都有多条时不连，`reason` 为 `many_to_many`。
+4. **上限**：同一范围里一个值一共匹配超过 50 条记录时不连，`reason` 为 `too_many`。
+
+比较时数字统一成字符串（`8080` 和 `"8080"` 相同），文本去掉首尾空白；逗号分隔的多值按整个字符串比较。边的形状是 `{source, target, kind: "match", match, value}`；`table_edges` 里是 `{kind: "match", match, count}`。`lint` 的 `ambiguous` 每项带 `match`、`value`、`fields`（参与比较的两个 `<表>.<字段>`，`self` 时只有一个）、`reason`、`scope`（范围祖先记录 `_id`，全域时为 null）、`records`（最多 20 条）和 `record_count`。
+
+页面上同值关联由接口计算：声明了 `match` 的字段在实时变更里被写入或改动时，图谱静默重新拉取。
 
 ### 依赖
 

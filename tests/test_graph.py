@@ -338,3 +338,127 @@ def test_graph_at_seq(api):
     assert edges(graph(api, at=tl["first_seq"])) == set() and len(graph(api, at=tl["first_seq"])["nodes"]) == 1
     now = graph(api, at=tl["last_seq"])
     assert {n["id"] for n in now["nodes"]} == {n["id"] for n in graph(api)["nodes"]}
+
+
+# ---------- 同值关联（config.match） ----------
+
+RUN = {
+    "name": "run",
+    "fields": [{"key": "title", "type": "text"}],
+    "children": [
+        {"name": "server", "fields": [
+            {"key": "sn", "type": "text"},
+            {"key": "group_no", "type": "text", "config": {"match": "group"}},
+            {"key": "state", "type": "text", "config": {"match": "state"}},
+        ]},
+        {"name": "problem", "fields": [
+            {"key": "title", "type": "text"},
+            {"key": "group_no", "type": "text", "config": {"match": "group"}},
+        ]},
+    ],
+}
+
+
+def match_edges_of(g):
+    return {(e["source"], e["target"], e["match"], e["value"]) for e in g["edges"] if e["kind"] == "match"}
+
+
+def test_match_only_within_common_parent(api):
+    api.apply(RUN)
+    r1, r2 = api.insert("run", {"title": "一"})["_id"], api.insert("run", {"title": "二"})["_id"]
+    s1 = api.insert("server", {"sn": "A", "group_no": "1.1", "state": "坏"}, parent_id=r1)["_id"]
+    s2 = api.insert("server", {"sn": "B", "group_no": "1.1", "state": "坏"}, parent_id=r1)["_id"]
+    p1 = api.insert("problem", {"title": "组 1.1", "group_no": "1.1"}, parent_id=r1)["_id"]
+    s3 = api.insert("server", {"sn": "C", "group_no": "1.1"}, parent_id=r2)["_id"]
+    p2 = api.insert("problem", {"title": "另一轮 1.1", "group_no": " 1.1 "}, parent_id=r2)["_id"]
+    # 多的一侧（server）指向唯一的一侧（problem）；不跨 run；同一个字段里同值（两台「坏」的 server）不连
+    want = {(s1, p1, "group", "1.1"), (s2, p1, "group", "1.1"), (s3, p2, "group", "1.1")}
+    assert match_edges_of(graph(api)) == want
+    te = {(e["source"], e["target"], e["kind"], e.get("match")): e["count"] for e in graph(api)["table_edges"]}
+    assert te[("server", "problem", "match", "group")] == 3
+    rel = api("GET", f"/d/{api.domain}/graph/related", ids=p1, kinds="match")
+    assert {n["id"] for n in rel["nodes"]} == {p1, s1, s2}
+    via = next(n["via"] for n in rel["nodes"] if n["id"] == s1)
+    assert via == {"from": p1, "dir": "in", "source": s1, "target": p1, "kind": "match", "match": "group", "value": "1.1"}
+    assert api("GET", f"/d/{api.domain}/graph/related", ids=p1, kinds="match:other")["nodes"] == [rel["nodes"][0]]
+    assert api.err("GET", f"/d/{api.domain}/graph/related", ids=p1, kinds="same")["code"] == "invalid_query"
+
+
+def test_match_many_to_many_and_limit_go_to_lint(api, monkeypatch):
+    api.apply(RUN)
+    r = api.insert("run", {})["_id"]
+    for sn in "AB":
+        api.insert("server", {"sn": sn, "group_no": "2.1"}, parent_id=r)
+    for t in ("甲", "乙"):
+        api.insert("problem", {"title": t, "group_no": "2.1"}, parent_id=r)
+    g = graph(api)
+    assert match_edges_of(g) == set()
+    amb = api("GET", f"/d/{api.domain}/graph/lint")["ambiguous"]
+    assert amb["total"] == 1
+    item = amb["items"][0]
+    assert (item["match"], item["value"], item["reason"], item["scope"], item["record_count"]) == ("group", "2.1", "many_to_many", r, 4)
+    assert item["fields"] == ["server.group_no", "problem.group_no"]
+
+    from dt import graph as graph_mod
+    monkeypatch.setattr(graph_mod, "MATCH_LIMIT", 2)
+    r2 = api.insert("run", {})["_id"]
+    api.insert("problem", {"title": "丙", "group_no": "3.1"}, parent_id=r2)
+    for sn in "CD":
+        api.insert("server", {"sn": sn, "group_no": "3.1"}, parent_id=r2)
+    reasons = {a["value"]: a["reason"] for a in api("GET", f"/d/{api.domain}/graph/lint")["ambiguous"]["items"]}
+    assert reasons == {"2.1": "too_many", "3.1": "too_many"}
+
+
+def test_match_across_unrelated_tables_and_numbers(api):
+    api.apply({"name": "host", "fields": [{"key": "name", "type": "text"}, {"key": "port", "type": "number", "config": {"match": "port"}}]})
+    api.apply({"name": "rule", "fields": [{"key": "name", "type": "text"}, {"key": "port", "type": "text", "config": {"match": "port"}}]})
+    h = api.insert("host", {"name": "web", "port": 8080})["_id"]
+    r1 = api.insert("rule", {"name": "放行", "port": "8080"})["_id"]
+    r2 = api.insert("rule", {"name": "限流", "port": "8080"})["_id"]
+    api.insert("rule", {"name": "无关", "port": "22"})
+    assert match_edges_of(graph(api)) == {(r1, h, "port", "8080"), (r2, h, "port", "8080")}
+    orphans = api("GET", f"/d/{api.domain}/graph/lint")["orphans"]["items"]
+    assert [o["title"] for o in orphans] == ["无关"]
+    hub = api("GET", f"/d/{api.domain}/graph/hubs", kinds="match")["items"][0]
+    assert (hub["id"], hub["in"]) == (h, 2)
+    text = api("GET", f"/d/{api.domain}/graph/related", ids=h, format="mermaid")["text"]
+    assert '-.->|"= port"|' in text
+
+
+def test_match_config_validation(api):
+    bad = api.err("POST", "/tables/apply", {"spec": {"name": "t", "fields": [{"key": "s", "type": "single_select", "options": ["a"], "config": {"match": "x"}}]}})
+    assert bad["code"] == "invalid_spec" and "match 只能用在" in bad["hint"]
+    assert api.err("POST", "/tables/apply", {"spec": {"name": "t", "fields": [{"key": "s", "type": "text", "config": {"match": "Bad Name"}}]}})["code"] == "invalid_spec"
+    api.apply({"name": "t", "fields": [{"key": "s", "type": "text"}]})
+    plan = api("POST", "/tables/apply", {"spec": {"name": "t", "fields": [{"key": "s", "type": "text", "config": {"match": "code"}}]}, "dry_run": True})["plan"]
+    assert [(p["op"], p["destructive"]) for p in plan] == [("update_field", False)] and "match" in plan[0]["detail"]
+
+
+def test_match_self_chains_same_field(api, monkeypatch):
+    api.apply({**RUN, "children": [
+        {**RUN["children"][0], "fields": [*RUN["children"][0]["fields"][1:], {"key": "sn", "type": "text", "config": {"match": "sn", "self": True}}]},
+        RUN["children"][1],
+    ]})
+    r1, r2, r3 = (api.insert("run", {})["_id"] for _ in range(3))
+    a1 = api.insert("server", {"sn": "A", "group_no": "1.1"}, parent_id=r1)["_id"]
+    b1 = api.insert("server", {"sn": "B", "group_no": "1.1"}, parent_id=r1)["_id"]
+    a2 = api.insert("server", {"sn": "A"}, parent_id=r2)["_id"]
+    a3 = api.insert("server", {"sn": " A "}, parent_id=r3)["_id"]
+    # 跨父记录、按 _id 串成链：后建的指向前一条，不两两全连；没写 self 的 group_no 同字段仍然不连
+    assert match_edges_of(graph(api)) == {(a2, a1, "sn", "A"), (a3, a2, "sn", "A")}
+    rel = api("GET", f"/d/{api.domain}/graph/related", ids=a1, kinds="match:sn", depth="all")
+    assert {n["id"] for n in rel["nodes"]} == {a1, a2, a3} and b1 not in {n["id"] for n in rel["nodes"]}
+
+    from dt import graph as graph_mod
+    monkeypatch.setattr(graph_mod, "MATCH_LIMIT", 2)
+    assert match_edges_of(graph(api)) == set()
+    amb = api("GET", f"/d/{api.domain}/graph/lint")["ambiguous"]["items"]
+    assert [(x["value"], x["reason"], x["fields"], x["record_count"]) for x in amb] == [("A", "too_many", ["server.sn"], 3)]
+
+
+def test_match_self_validation(api):
+    err = api.err("POST", "/tables/apply", {"spec": {"name": "t", "fields": [{"key": "s", "type": "text", "config": {"self": True}}]}})
+    assert err["code"] == "invalid_spec" and "match" in err["message"]
+    api.apply({"name": "t", "fields": [{"key": "s", "type": "text", "config": {"match": "s"}}]})
+    plan = api("POST", "/tables/apply", {"spec": {"name": "t", "fields": [{"key": "s", "type": "text", "config": {"match": "s", "self": True}}]}, "dry_run": True})["plan"]
+    assert [(p["op"], p["destructive"]) for p in plan] == [("update_field", False)] and "self" in plan[0]["detail"]

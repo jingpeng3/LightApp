@@ -596,7 +596,7 @@ def inbox_delete(message_id: int, domain: DomainOpt = None, actor: ActorOpt = No
 
 # ---------- graph ----------
 
-KindsOpt = Annotated[str | None, typer.Option("--kinds", help="只走这些连线，逗号分隔：parent、link、link:<表>.<字段>")]
+KindsOpt = Annotated[str | None, typer.Option("--kinds", help="只走这些连线，逗号分隔：parent、link、link:<表>.<字段>、match、match:<名字>")]
 DirOpt = Annotated[str, typer.Option("--direction", help="both；out 沿父→子、引用方→被引用方；in 反过来")]
 
 
@@ -667,7 +667,7 @@ def _changed(c: dict | None) -> str:
 def _via(v: dict | None) -> str:
     if v is None:
         return "起点"
-    edge = "父子" if v["kind"] == "parent" else v["field"]
+    edge = "父子" if v["kind"] == "parent" else f"={v['match']}" if v["kind"] == "match" else v["field"]
     return f"#{v['from']} {'→' if v['dir'] == 'out' else '←'} {edge}"
 
 
@@ -681,7 +681,7 @@ def graph_path(source: int, target: int, domain: DomainOpt = None, direction: Di
 @graph_app.command("lint")
 def graph_lint(domain: DomainOpt = None, tables: str = typer.Option(None, "--tables", help="只检查这些表"),
                limit: int = typer.Option(200, "--limit", help="每类最多列出多少条")):
-    """检查悬空引用（link 指向的记录不存在）、孤立记录（没有任何关联）和自引用 link 字段里的依赖环。"""
+    """检查悬空引用（link 指向的记录不存在）、孤立记录（没有任何关联）、自引用 link 字段里的依赖环，以及同值关联里有歧义没连上的值。"""
     run("GET", f"{dpath(domain)}/graph/lint", params=_graph_params(tables=tables, limit=limit), domain=domain)
 
 
