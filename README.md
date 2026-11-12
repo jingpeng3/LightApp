@@ -114,7 +114,7 @@ flowchart LR
     agent["🤖 Agent<br/>Skill + dt CLI"] -->|JSON over HTTP| api["dt serve<br/>校验 · 审计 · 推送"]
     human["👤 人<br/>浏览器"] <-->|HTTP 编辑 / WebSocket| api
     api --> db[("SQLite<br/>记录 · 变更 · 绑定")]
-    api -->|按需查询| graph["🕸 图谱查询<br/>父子 / link / 依赖"]
+    api -->|按需查询| gq["🕸 图谱查询<br/>父子 / link / 依赖"]
     api -->|匹配绑定| hook["🔔 webhook / command<br/>write / inbox"]
     hook --> agent
 ```

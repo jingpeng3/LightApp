@@ -114,7 +114,7 @@ flowchart LR
     agent["🤖 Agent<br/>Skill + dt CLI"] -->|JSON over HTTP| api["dt serve<br/>validate · audit · push"]
     human["👤 Human<br/>browser"] <-->|HTTP edit / WebSocket| api
     api --> db[("SQLite<br/>records · changes · bindings")]
-    api -->|on demand| graph["🕸 graph queries<br/>parent / link / dependency"]
+    api -->|on demand| gq["🕸 graph queries<br/>parent / link / dependency"]
     api -->|match bindings| hook["🔔 webhook / command<br/>write / inbox"]
     hook --> agent
 ```
