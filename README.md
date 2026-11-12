@@ -29,6 +29,10 @@ dt 是一个本机运行的动态表格。它要解决的不是「再做一个�
 
 完整能力介绍（含 TEAMS 实战案例）见 [docs/introduction.md](docs/introduction.md)，数据模型与接口设计见 [docs/design.md](docs/design.md)。
 
+![dt 表格视图](docs/images/overview.png)
+
+<p align="center"><sub>表格视图：任务与嵌套子表、状态标签、操作者和附件；左侧可切换收件箱、事件与图谱</sub></p>
+
 ## 快速开始
 
 ### 1. 安装前置依赖

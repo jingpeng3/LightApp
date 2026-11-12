@@ -29,6 +29,10 @@ dt is a dynamic table that runs on your machine. It is not "yet another spreadsh
 
 For a full capability overview (including the TEAMS case study), see [docs/introduction.md](docs/introduction.md). For the data model and API design, see [docs/design.md](docs/design.md).
 
+![dt table view](docs/images/overview.png)
+
+<p align="center"><sub>Table view: tasks with nested child tables, status tags, actors, and attachments; the sidebar switches between inbox, events, and the graph</sub></p>
+
 ## Quick start
 
 ### 1. Prerequisites
