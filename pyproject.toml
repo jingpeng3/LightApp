@@ -5,7 +5,7 @@ description = "给 Agent 用的动态表格"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "jingpeng02" }]
+authors = [{ name = "jingpeng3" }]
 keywords = ["agent", "llm", "sqlite", "fastapi", "cli", "knowledge-graph"]
 classifiers = [
     "Development Status :: 3 - Alpha",
