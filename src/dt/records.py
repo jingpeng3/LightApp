@@ -203,12 +203,14 @@ def attach(tx: Tx, table: Table, record_id, key: str, paths) -> dict:
 
 
 def delete(tx: Tx, table: Table, record_id) -> dict:
-    deleted = []
-    _delete_tree(tx, table, _fetch(tx.conn, table, record_id), deleted)
-    return {"deleted": deleted}
+    """unlinked 是因为引用了被删记录而被改掉 link 字段、自己没被删的记录。"""
+    deleted, unlinked = [], []
+    _delete_tree(tx, table, _fetch(tx.conn, table, record_id), deleted, unlinked)
+    gone = {d["_id"] for d in deleted}
+    return {"deleted": deleted, "unlinked": [u for u in unlinked if u["_id"] not in gone]}
 
 
-def _delete_tree(tx: Tx, table: Table, row, deleted: list):
+def _delete_tree(tx: Tx, table: Table, row, deleted: list, unlinked: list):
     for name in table.children:
         child = get_table(tx.conn, table.domain_id, name)
         rows = tx.execute("SELECT * FROM dt_records WHERE table_id = ? AND parent_id = ?", (child.id, row["id"])).fetchall()
@@ -218,14 +220,14 @@ def _delete_tree(tx: Tx, table: Table, row, deleted: list):
                 f"{name} 设置了 on_delete: restrict，先删除这些子记录", status=409,
             )
         for r in rows:
-            _delete_tree(tx, child, r, deleted)
+            _delete_tree(tx, child, r, deleted, unlinked)
     tx.execute("DELETE FROM dt_records WHERE id = ?", (row["id"],))
     tx.log(table.name, row["id"], "delete", to_output(table, row), None)
     deleted.append({"table": table.name, "_id": row["id"]})
-    _unlink(tx, table, row["id"])
+    _unlink(tx, table, row["id"], unlinked)
 
 
-def _unlink(tx: Tx, table: Table, record_id: int):
+def _unlink(tx: Tx, table: Table, record_id: int, unlinked: list):
     """从其他表的 link 字段里去掉已删除的记录 id。"""
     for other in list_tables(tx.conn, table.domain_id):
         for f in other.active_fields:
@@ -245,6 +247,7 @@ def _unlink(tx: Tx, table: Table, record_id: int):
                 else:
                     data.pop(f.key)
                 write_data(tx, other, r, data)
+                unlinked.append({"table": other.name, "_id": r["id"], "field": f.key, "target": record_id})
 
 
 def parse_include(include) -> dict:

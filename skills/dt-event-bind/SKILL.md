@@ -12,7 +12,7 @@ dt 的记录事件由写入自动产生（insert / update / delete，表结构�
 ## 必带参数
 
 - `-D <域>`：除 `dt domain ...` 外每条命令都要写。dt 不读环境变量里的域。
-- `-A <你的名字>`：`bind` / `update` / `unbind` 等写入命令必须写，例如 `-A claude`。
+- `-A <你的名字>`：`bind` / `update` / `unbind` / `retry`，以及 `dt inbox read` / `unread` / `read-all` / `delete` 都是写入命令，必须写，例如 `-A claude`。只有 `binds` / `deliveries` / `inbox list` 这类读取不需要。
 
 所有命令输出 JSON：成功 `{"ok": true, "domain": "...", "data": ...}`，失败 `{"ok": false, "error": {"code", "message", "hint"}}`，按 `hint` 修正后重试。
 
@@ -36,6 +36,7 @@ dt table show task -D proj_a       # 字段 key、类型、选项、描述
 - 字段：省略表示任意字段；指定后只在**该字段实际变化**时命中
 - `where`：变化后的记录满足的条件（delete 看变化前）
 - `where_before`：变化前的记录满足的条件
+- `prompt`：可选，随动作给消费方的一段提示词（见下文「提示词」）
 - 动作：`webhook` / `command` / `write` / `inbox`
 
 典型条件：
@@ -103,13 +104,19 @@ dt event bind -D proj_a -A claude inbox-done \
   --config '{"title":"${record.title} 完成了","body":"${fields.status.before} → ${fields.status.after}"}'
 
 dt inbox list -D proj_a --status unread
-dt inbox read -D proj_a 12
-dt inbox read-all -D proj_a
+dt inbox read -D proj_a -A claude 12
+dt inbox read-all -D proj_a -A claude
 ```
 
 - 每个事件一条收件箱消息；`title` / `body` 留空时使用默认摘要。
 - inbox 动作只写本地库，不调用外部服务；仍然是异步投递，稍等片刻或在页面刷新/等待自动刷新。
 - 收件箱消息按绑定 + 事件去重，重试不会重复；消息不会自动过期，可 `dt inbox delete` 删除。
+
+**提示词**：`--prompt '任务 ${record.title} 已完成，请检查产出并更新下游。'` 可选，让消费方知道要做什么，而不只是收到数据变化。
+
+- webhook：payload 的 `prompt` 字段；command：`DT_PROMPT` 环境变量；inbox：消息的 `prompt`，页面和 `dt inbox list` 都能看到。
+- 支持和 `title` / `body` 一样的模板；一次带多条事件时，webhook / command 用第一条事件渲染，inbox 每条消息各自渲染。
+- 修改用 `dt event update -D <域> -A <你的名字> <name> --prompt '...'`，传空字符串清除。
 
 完整的 config 字段、webhook payload、模板变量见 [references/actions.md](references/actions.md)。
 
@@ -117,15 +124,15 @@ dt inbox read-all -D proj_a
 
 ```bash
 dt event binds -D proj_a                     # 列出当前域的绑定，核对 ops / 表 / 字段 / 条件 / 动作
-dt event deliveries -D proj_a notify-done    # 看投递状态；failed 可用 retry 重试
-dt event retry -D proj_a notify-done
+dt event deliveries -D proj_a notify-done    # 看投递状态、last_result（HTTP 状态码 / 退出码 / 写入条数）；failed 可用 retry 重试
+dt event retry -D proj_a -A claude notify-done
 dt inbox list -D proj_a --status unread      # inbox 动作看消息是否写入
 ```
 
 想先建但不触发，可以加 `--disabled`；确认后再启用：
 
 ```bash
-dt event update -D proj_a notify-done --enabled
+dt event update -D proj_a -A claude notify-done --enabled
 ```
 
 验证时尽量只做一次小范围、可回滚的记录变更；不要为了测试绑定批量写数据。测试前先告诉用户会改哪条记录。
@@ -140,7 +147,7 @@ dt event unbind -D proj_a -A claude notify-done
 ```
 
 - 只传要改的项；改 `--action` 时通常要同时传新的 `--config`。
-- 清除条件传空字符串：`--where ''`、`--where-before ''`。
+- 清除条件传空字符串：`--where ''`、`--where-before ''`、`--prompt ''`。
 - 把绑定改成整个域：`--table '' --field ''`。
 - `unbind` 会删除绑定及其投递记录；只是想暂时停用用 `--disabled`。
 

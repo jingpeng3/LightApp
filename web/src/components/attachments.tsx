@@ -1,4 +1,4 @@
-import { AlertTriangle, ChevronRight, Copy, Download, File, FileCode2, FileImage, FileText, Folder, FolderOpen, X } from "lucide-react";
+import { AlertTriangle, ChevronRight, Copy, Download, ExternalLink, File, FileCode2, FileImage, FileText, Folder, FolderOpen, X } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { Attachment, FileState } from "../api";
 import { api, fileUrl } from "../api";
@@ -46,19 +46,36 @@ export function AttachmentChip({ item, state, recordId, field, idx }: { item: At
   const { preview } = useApp();
   const bad = state === "missing";
   return (
-    <button
-      type="button"
-      title={`${item.path}${state && state !== "ok" ? `\n${STATE_TEXT[state]}` : ""}`}
-      onClick={(e) => (e.stopPropagation(), preview({ recordId, field, idx, item }))}
+    <span
       className={cx(
-        "inline-flex h-[20px] max-w-[180px] shrink-0 items-center gap-1 rounded-[4px] border px-1.5 text-[12px] transition-colors",
+        "inline-flex h-[20px] max-w-[180px] shrink-0 items-center rounded-[4px] border text-[12px] transition-colors",
         bad ? "border-dashed border-danger/60 text-danger line-through decoration-danger/50" : state === "changed" ? "border-warn/60 text-ink" : "border-line-strong text-ink hover:border-accent hover:text-accent",
       )}
     >
-      <span className={cx("shrink-0", !bad && "text-ink-3")}><KindIcon name={item.name} dir={item.kind === "dir"} size={12} /></span>
-      <span className="truncate">{item.name}</span>
-      {state === "changed" && <span className="size-[6px] shrink-0 rounded-full bg-warn" />}
-    </button>
+      <button
+        type="button"
+        title={`${item.path}${state && state !== "ok" ? `\n${STATE_TEXT[state]}` : ""}`}
+        onClick={(e) => (e.stopPropagation(), preview({ recordId, field, idx, item }))}
+        className="inline-flex h-full min-w-0 items-center gap-1 pr-1 pl-1.5"
+      >
+        <span className={cx("shrink-0", !bad && "text-ink-3")}><KindIcon name={item.name} dir={item.kind === "dir"} size={12} /></span>
+        <span className="truncate">{item.name}</span>
+        {state === "changed" && <span className="size-[6px] shrink-0 rounded-full bg-warn" />}
+      </button>
+      {/* 目录附件必须带 sub 才能读文件，外部打开放到预览面板里 */}
+      {item.kind === "file" && (
+        <a
+          href={fileUrl(recordId, field, idx)}
+          target="_blank"
+          rel="noopener noreferrer"
+          title="在新标签页打开"
+          onClick={(e) => e.stopPropagation()}
+          className="flex h-full items-center pr-1 pl-0.5 text-ink-3 hover:text-accent"
+        >
+          <ExternalLink size={10} />
+        </a>
+      )}
+    </span>
   );
 }
 
@@ -109,9 +126,14 @@ export function PreviewModal({ target, state, onClose }: { target: PreviewTarget
             </div>
           </div>
           {url && state !== "missing" && (
-            <a href={url} download={name.split("/").pop()} className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line-strong px-2 text-[12.5px] text-ink-2 hover:text-ink">
-              <Download size={13} /> 下载
-            </a>
+            <>
+              <a href={url} target="_blank" rel="noopener noreferrer" title="在新标签页打开" className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line-strong px-2 text-[12.5px] text-ink-2 hover:text-ink">
+                <ExternalLink size={13} /> 打开
+              </a>
+              <a href={url} download={name.split("/").pop()} className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line-strong px-2 text-[12.5px] text-ink-2 hover:text-ink">
+                <Download size={13} /> 下载
+              </a>
+            </>
           )}
           <button type="button" onClick={onClose} className="inline-flex size-7 items-center justify-center rounded-md text-ink-2 hover:bg-raise hover:text-ink" title="关闭 (Esc)">
             <X size={16} />

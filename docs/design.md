@@ -37,9 +37,9 @@ Agent ──(Skill)──> dt CLI ──HTTP──┐
 | `dt_changes` | seq, tx, domain, table_name, record_id, op, before, after, fields, actor, ts |
 | `dt_change_fields` | seq, field（记录事件实际变化的字段，按字段筛选走索引） |
 | `dt_counters` | table_id, field_key, value（auto_number 计数器） |
-| `dt_bindings` | domain, name, ops, table_name, field, where_expr, where_before, action, config, enabled |
-| `dt_deliveries` | binding_id, change_seq, last_seq, seqs, event_count, status, attempts, next_attempt_at, last_error |
-| `dt_inbox` | domain, binding_id, binding_name, event_seq, table_name, record_id, op, title, body, events, status, created_at, read_at |
+| `dt_bindings` | domain, name, ops, table_name, field, where_expr, where_before, prompt, action, config, enabled |
+| `dt_deliveries` | binding_id, change_seq, last_seq, seqs, event_count, status, attempts, next_attempt_at, last_error, last_result |
+| `dt_inbox` | domain, binding_id, binding_name, event_seq, table_name, record_id, op, title, body, prompt, events, status, created_at, read_at |
 
 ### 系统字段
 
@@ -204,8 +204,17 @@ dt rec get task 12 --include task_log
 dt rec query task --where '{...}' --sort -_updated_at --limit 20 --include task_log [--format table]
 dt rec update task 12 --set '{"status":"完成"}' [--if-version 3]
 dt rec attach task 12 output /abs/path [/abs/path2]   # 追加附件
+dt rec impact task 12                           # 删除前预览：cascade、unlink、blocked
 dt rec delete task 12
 dt history [--table task] [--id 12] [--since SEQ]
+
+dt graph related 12 [13 ...] [--by codex] [--depth 1|all] [--direction both|out|in] [--kinds parent,link:task.needs] [--tables a,b] [--limit 500]
+                 [--where '{...}'] [--since SEQ] [--fields '*'|a,b] [--format json|table|mermaid|dot]
+dt graph path 12 7 [--direction ...] [--kinds ...] [--format json|mermaid|dot]
+dt graph lint [--tables a,b] [--limit 200]
+dt graph ready --field task.needs --done '{"status":"完成"}' [--where '{...}'] [--fields ...] [--format table]
+dt graph order [12 ...] --field task.needs [--done '{...}'] [--format table]
+dt graph hubs [--tables a,b] [--kinds ...] [--limit 20] [--format table]
 
 # 记录事件（只包含 insert / update / delete，带字段级 diff）
 dt event list -D proj_a [--table task] [--field status] [--op update] [--id 12] [--since SEQ]
@@ -213,8 +222,10 @@ dt event watch -D proj_a [--table task] [--field status] [--op update] [--since 
 
 # 事件绑定
 dt event bind -D proj_a notify-done --on update --table task --field status \
-  --where '{"status":"完成"}' --action webhook --config '{"url":"http://127.0.0.1:9000/hook"}'
+  --where '{"status":"完成"}' --action webhook --config '{"url":"http://127.0.0.1:9000/hook"}' \
+  --prompt '任务 ${record.title} 已完成，请检查产出'
 dt event binds -D proj_a
+dt event update -D proj_a notify-done [--prompt '...'] [--enabled/--disabled]
 dt event unbind -D proj_a notify-done
 dt event deliveries -D proj_a notify-done [--status failed]
 dt event retry -D proj_a notify-done
@@ -255,14 +266,22 @@ dt inbox delete -D proj_a 12
 | GET | `/tables/{name}/records/{id}?include=` | |
 | POST | `/tables/{name}/query` | `{where, sort, limit, offset, include, parent_id}` |
 | PATCH | `/tables/{name}/records/{id}` | `{set, if_version}` |
-| DELETE | `/tables/{name}/records/{id}` | |
+| GET | `/tables/{name}/records/{id}/impact` | 删除前预览，见第 14 节 |
+| DELETE | `/tables/{name}/records/{id}` | 返回 `deleted` 和 `unlinked`（被去掉引用的记录） |
 | POST | `/tables/{name}/records/{id}/attach` | `{field, paths}` |
 | GET | `/changes` | `?table=&record_id=&since=&limit=` |
 | GET | `/events` | `?op=&table=&field=&record_id=&since=&limit=`；只含 insert/update/delete，返回 `{items, seq}`，`seq` 是游标 |
-| GET | `/graph` | `?tables=&limit=`；知识图谱的节点和边，见第 14 节 |
+| GET | `/graph` | `?tables=&limit=&at=&format=`；知识图谱的节点和边，见第 14 节 |
+| GET | `/graph/related` | `?ids=&actor=&depth=&direction=&kinds=&tables=&limit=&where=&since=&fields=&format=`；关联查询 |
+| GET | `/graph/path` | `?source=&target=&direction=&kinds=&format=`；两条记录间最短路径 |
+| GET | `/graph/lint` | `?tables=&limit=`；悬空引用、孤立记录、依赖环 |
+| GET | `/graph/ready` | `?field=&done=&where=&limit=&fields=`；依赖都完成、可以开工的记录 |
+| GET | `/graph/order` | `?field=&ids=&done=`；按依赖的拓扑序 |
+| GET | `/graph/hubs` | `?tables=&kinds=&limit=`；连接最多的记录 |
 | GET/POST | `/bindings` | 事件绑定列表 / 新建 |
 | PATCH/DELETE | `/bindings/{name}` | 修改 / 删除绑定 |
 | GET | `/bindings/{name}/deliveries` | `?status=&limit=` 投递记录 |
+| GET | `/bindings/{name}/deliveries/{id}` | 一条投递的详情：状态、时间、结果和携带的完整事件 |
 | POST | `/bindings/{name}/retry` | 重新排队失败的投递 |
 | GET | `/inbox` | `?status=unread|read&limit=&offset=`；返回 `{items, total, unread}` |
 | PATCH | `/inbox/{id}` | `{status: "read"|"unread"}` |
@@ -308,7 +327,7 @@ src/dt/
   records.py     记录 CRUD、嵌套插入、级联、changes
   events.py      记录事件、绑定匹配、投递与动作
   inbox.py       收件箱消息查询、已读与删除
-  graph.py       知识图谱的节点和边
+  graph.py       知识图谱的节点和边，关联查询、路径、检查、删除影响
   server.py      FastAPI 路由
   cli.py         Typer CLI
 skills/          dt-schema/、dt-data/、dt-event-bind/、dt-event-consume/
@@ -347,6 +366,7 @@ table: task                # 省略表示整个域
 field: status              # 省略表示表内任意字段；指定时必须写 table
 where: {status: 完成}       # 变化后的值；delete 用变化前
 where_before: {status: 待办} # 可选，变化前的值
+prompt: "任务 ${record.title} 完成了，请检查产出并更新下游。"  # 可选，随投递一起给消费方
 action: webhook
 config: {url: "http://127.0.0.1:9000/hook"}
 enabled: true
@@ -368,13 +388,21 @@ enabled: true
 - `batch`：一次动作最多合并多少条投递，默认 20，最大 1000。同一事务、同一绑定的事件会先合并成一条投递，超过 1000 条拆成多条。
 - `max_pending`：该绑定允许积压的待投递条数，默认 50000。达到上限后新事件会跳过并写服务日志。
 
+绑定的顶层 `prompt` 是一段给消费方的提示词，支持 `${record.title}`、`${fields.status.after}` 等模板：
+
+- `webhook`：放在 payload 的 `prompt` 字段；`command`：通过 `DT_PROMPT` 环境变量传入；`inbox`：存到消息的 `prompt` 并在收件箱展示。
+- webhook / command 一次可能带多条事件，`prompt` 用第一条事件渲染；inbox 每条消息各自用对应事件渲染。
+- 留空或渲染结果为空时不发送；`write` 动作没有消费方，忽略 `prompt`。
+
 - 投递发生在 `dt serve` 进程内，事务提交后由后台任务执行；服务没开时投递会留在 `pending`，下次启动继续。调度器处理到活就立即继续，不再固定等 0.5s。
 - 同一绑定按 `seq` 顺序投递；失败退避 1s / 5s / 30s / 2m / 10m / 30m / 1h，超过后标 `failed`，可 `dt event retry`。
+- 每次投递的动作结果记在 `last_result`（webhook 的 `HTTP <code>`、command 的退出码、write / inbox 的写入条数）；`failed` / `pending` 时为 null，错误信息在 `last_error`。
+- `dt serve` 会为每次投递打一行日志：`INFO 投递 #12 绑定 notify-done（webhook）2 条事件 → HTTP 200，38ms`；失败打 WARNING，带第几次尝试和错误。
 - 语义是 at-least-once：接收方按 `X-DT-Delivery`（或事件 `seq`）去重。
 - `write` 动作自己写库时不会再触发绑定，避免回环。
 - `command` 会以服务进程身份执行本机命令，只应在本地单人环境里配置可信命令。
 - `sent` 投递保留 7 天、`failed` 保留 30 天，后台每小时清理一次；`pending` 不受清理影响。
-- `inbox` 消息按 `(binding_id, event_seq)` 去重，重试不会重复写入；消息里的 `events` 保存完整事件快照，读状态用 `status` / `read_at`。收件箱消息不会被自动清理，需要时用 `dt inbox delete` 或页面删除。
+- `inbox` 消息按 `(binding_id, event_seq)` 去重，重试不会重复写入；消息里的 `events` 保存完整事件快照，`prompt` 是绑定提示词按该事件渲染的结果，读状态用 `status` / `read_at`。收件箱消息不会被自动清理，需要时用 `dt inbox delete` 或页面删除。
 
 ### 性能相关
 
@@ -400,7 +428,7 @@ enabled: true
 ### 两个视图
 
 - **记录图**：记录和操作者作为节点。域内记录不超过 1500 条时默认进入这个视图。
-- **表概览**：表作为节点，父子和 link 关系作为边，边上标注条数。超过 1500 条时默认进入；点一张表进入只含这张表的记录图。
+- **表概览**：表作为节点，父子和 link 关系作为边，边上标注条数；顶部显示孤立记录总数，悬停表节点显示该表的孤立数。超过 1500 条时默认进入；点一张表进入只含这张表的记录图。
 
 ### 实时变化
 
@@ -417,13 +445,20 @@ enabled: true
 ### 筛选
 
 - 表：图例里点表切换范围，范围变化时重新拉图。
-- 焦点：搜索或双击节点设为中心，深度 1–3 跳，只沿当前显示的边、在当前范围内遍历。
+- 焦点：搜索（可直接输入 `_id`）或双击节点设为中心。由 `/graph/related` 在整个域上计算，不受 3000 条快照的限制；深度 1–3 跳或「全部」，方向可选双向、它指向的、指向它的；只沿「连线」里打开的父子和 link 边、在当前表范围内遍历。右侧列出关联记录，按跳数分组，说明经哪条边到达。关联记录有变更时静默重拉。
+- 路径：选中一个节点后 Shift+单击另一个节点，调用 `/graph/path`，路径上的边高亮，顶部显示每一步。
 - 连线：父子、每个 link 字段、操作边分别开关。
 - 操作者：只显示选中操作者 insert / update 过的记录。
 - 时间：只显示最近 1 小时 / 24 小时更新过的记录。
 - 筛选状态写在地址栏，例如 `#teams/@graph?tables=task,agent&focus=12&depth=2&actors=claude`。
 
 单击节点高亮它和直接邻居，并在右侧打开记录抽屉；单击操作者节点切换按该操作者筛选。
+
+- 枢纽：筛选行的「枢纽」菜单按当前表范围和连线开关列出连接最多的 15 条记录，点一条设为焦点。
+- 拖线建 link：按住 Alt 把一条记录拖到另一条上，拖动时画虚线并圈出松手就会连上的目标，其他节点临时固定不动。松手后列出两条记录之间可用的 link 字段（任一方向）：多值字段追加，单值字段标出会替换掉的旧值，已引用的置灰。写入带 `if_version`，期间记录被改过时提示冲突。拖动节点本身回到原位。
+- 历史回放：标题旁的回放按钮打开时间轴，范围是域内第一条到最后一条记录变更的 seq。拖动时间轴停手 250ms 后按 `at=<seq>` 重新拉那一刻的图；播放时从当前位置起逐条拉取 `dt_changes`，每条记录变更停 450ms，复用实时变化的脉冲和活动带。回放期间不应用实时变更（只延长时间轴终点），焦点、拖线不生效；换表范围、切到表概览或表结构变化时退出回放。
+
+记录抽屉里有「关联」区块，列出它引用的和引用它的记录（link 字段），并可跳到以它为焦点的图谱。删除记录前调用 `impact`，确认框里列出会级联删除的子记录和会被去掉引用的记录；被 restrict 子表挡住时直接提示。
 
 ### 接口
 
@@ -440,6 +475,36 @@ enabled: true
                  {"source": "task", "target": "agent", "kind": "link", "field": "agent", "count": 520}]}
 ```
 
-- `tables` 省略表示整个域；`limit` 默认 3000、最大 10000，超过时只保留最近更新的记录，`truncated` 为 true。`limit=0` 只返回 `table_edges` 和 `total`，给表概览用。
-- `edges` 和 `touches` 只包含两端都在 `nodes` 里的边；`table_edges` 统计整个域。
-- v1 不做：在图上编辑 link、跨域图、保存布局、历史回放、同值连接。
+- `tables` 省略表示整个域；`limit` 默认 3000、最大 10000，超过时只保留最近更新的记录，`truncated` 为 true。`limit=0` 只返回 `table_edges`、`orphans` 和 `total`，给表概览用。
+- `edges` 和 `touches` 只包含两端都在 `nodes` 里的边；`table_edges` 和 `orphans`（每张表没有任何父子或 link 关系的记录数）统计整个域。
+- `at=<seq>` 返回那一刻的图：每条记录取 seq 不超过 `at` 的最后一次变更的 `after`，最后一次是 delete 的跳过；`touches` 也只算到 `at`。按当前表结构解释旧数据，已删除的表不出现。返回的 `seq` 等于 `at`，另带 `timeline: {first_seq, last_seq, at_ts}`。
+- `format=mermaid|dot` 时（`/graph`、`related`、`path` 都支持）返回 `{format, text}`：节点按表分组，父子边实线，link 边虚线并标字段名。
+- 下面这些接口都在整个域上计算，不受 `limit` 截断影响。连线类型 `kinds` 逗号分隔：`parent`、`link`（全部 link 字段）、`link:<表>.<字段>`；操作者边不参与遍历。`direction=out` 沿父→子、引用方→被引用方走，`in` 反过来。
+
+`GET /api/d/{domain}/graph/related?ids=12&depth=all&direction=in&kinds=link`
+
+```json
+{"seq": 1042, "seeds": [12], "truncated": false,
+ "nodes": [{"id": 12, "table": "task", "title": "写设计", "depth": 0, "via": null, "…": "…"},
+           {"id": 15, "table": "task", "title": "实现", "depth": 1,
+            "via": {"from": 12, "dir": "in", "source": 15, "target": 12, "kind": "link", "field": "needs"}}],
+ "edges": [{"source": 15, "target": 12, "kind": "link", "field": "needs"}],
+ "touches": [{"actor": "claude", "record_id": 12, "count": 3}]}
+```
+
+- `ids` 和 `actor` 至少给一个；`actor` 把它 insert / update 过、现在还在的记录也作为起点。`depth` 默认 1，`all` 表示不限；`limit` 默认 500、最大 5000，超出时 `truncated` 为 true。`tables` 限定只经过哪些表，起点不受限。
+- `where`（查询 DSL 的 JSON）和 `since`（seq）只筛选返回的记录，不影响遍历，起点总是保留；`edges` 只含筛选后两端都在的边。`where` 用到的字段在某张表里不存在时，这张表的记录都算不满足，所有表都没有时报 `invalid_query`。`since` 给出时每个节点带 `changed: {count, last_seq, last_ts, ops, actors, fields}`（起点没变化时为 null）。
+- `fields=*` 时每个节点带 `data`（和 `rec get` 一样的完整记录），`fields=a,b` 只带这些 key。
+- `path` 返回 `{found, nodes, edges}`，`edges` 按路径顺序，每条带 `dir`。
+- `lint` 返回 `dangling`（link 指向的记录不存在，通常是绕过接口写入的老数据）、`orphans`（没有父子也没有 link 关系）和 `cycles`（自引用 link 字段里成环的记录，含自己依赖自己），各自 `{total, items}`。
+- `impact` 返回 `record`、`cascade`（会一起删的子记录）、`unlink`（会被去掉引用的记录和字段）、`blocked`（restrict 子表挡住删除时非空）。
+
+### 依赖
+
+一个 link 字段可以看成「持有方依赖被引用方」，最常见的是自引用的 `task.needs → task`。`field` 写成 `<表>.<字段>`，不是 link 字段时报错并列出可用的 link 字段。悬空的依赖不算阻塞（用 `lint` 检查）。
+
+- `ready?field=task.needs&done={"status":"完成"}` 返回 `ready`（自己不满足 `done`、依赖全部满足 `done`）和 `blocked`（还有依赖没完成，带 `waiting` 和 `in_cycle`），各自 `{total, items}`，另有已完成数 `done`。`where` 只筛选候选记录；`fields` 同 `related`。
+- `order?field=task.needs` 用 Kahn 算法给出拓扑序：被依赖的在前，`level` 是最长依赖链的层数，同层之间没有依赖。`ids` 给出时只排这些记录和它们（间接）依赖的记录；`done` 给出时已完成的记录不参与排序，也不再算作依赖。排不出来的记录放进 `stuck`，其中的环放进 `cycles`（Tarjan 强连通分量），`complete` 为 false。
+- `hubs` 按连接数（`in` + `out`，只算 `kinds` 里的边）列出记录，同数按被指向的边数排。
+
+- v1 不做：跨域图、保存布局、同值连接、在图上删除 link（在记录抽屉里改字段）。

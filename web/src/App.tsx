@@ -1,4 +1,4 @@
-import { PanelRightClose, PanelRightOpen, Plus, Search } from "lucide-react";
+import { Plus, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Domain, FileState, TableInfo } from "./api";
 import { api, setDomain } from "./api";
@@ -13,13 +13,13 @@ import { InboxView } from "./components/inbox";
 import { Sidebar } from "./components/sidebar";
 import { Btn, Ctx, Empty, useApp, type AppCtx, type PreviewTarget, type Target } from "./components/ui";
 import { onChange, startLive } from "./live";
-import { cx, tableLabel, toastError, useToasts } from "./util";
+import { cx, recordHash, tableHash, tableLabel, toastError, useAsk, useToasts } from "./util";
 
-/** 地址栏 hash 是 #域/表；图谱的筛选条件跟在 ? 后面。 */
+/** 地址栏 hash 是 #域/表；多一段数字就是记录的 _id，图谱的筛选条件跟在 ? 后面。 */
 function fromHash() {
   const [path, qs = ""] = location.hash.slice(1).split("?");
-  const [d, t] = decodeURIComponent(path).split("/");
-  return { domain: d || null, table: t || null, qs };
+  const [d, t, id] = decodeURIComponent(path).split("/");
+  return { domain: d || null, table: t || null, recordId: id && /^\d+$/.test(id) ? Number(id) : null, qs };
 }
 
 export default function App() {
@@ -65,13 +65,14 @@ export default function App() {
     );
   }
   if (active !== domain.name) return null;
-  return <DomainView key={domain.name} domain={domain} domains={domains} tableName={route.table} qs={route.qs} onSwitch={switchDomain} onDomainsChanged={loadDomains} />;
+  return <DomainView key={domain.name} domain={domain} domains={domains} tableName={route.table} recordId={route.recordId} qs={route.qs} onSwitch={switchDomain} onDomainsChanged={loadDomains} />;
 }
 
-function DomainView({ domain, domains, tableName, qs, onSwitch, onDomainsChanged }: {
+function DomainView({ domain, domains, tableName, recordId, qs, onSwitch, onDomainsChanged }: {
   domain: Domain;
   domains: Domain[];
   tableName: string | null;
+  recordId: number | null;
   qs: string;
   onSwitch: (name: string) => void;
   onDomainsChanged: () => void;
@@ -82,11 +83,11 @@ function DomainView({ domain, domains, tableName, qs, onSwitch, onDomainsChanged
   const inboxView = current === "@inbox";
   const graphView = current === "@graph";
   const [record, setRecord] = useState<Target | null>(null);
-  const [full, setFull] = useState<Target | null>(null);
   const [creating, setCreating] = useState<{ table: string; parentId?: number | null } | null>(null);
   const [preview, setPreview] = useState<{ target: PreviewTarget; state?: FileState } | null>(null);
   const [search, setSearch] = useState("");
-  const [feedOpen, setFeedOpen] = useState(() => localStorage.getItem("dt-feed") !== "0");
+  const [feedOpen, toggleFeed] = usePanel("dt-feed", 1280);
+  const [sidebarOpen, toggleSidebar] = usePanel("dt-sidebar", 1024);
   const [theme, setTheme] = useState(() => document.documentElement.dataset.theme ?? "light");
 
   const loadTables = useCallback(() => api.tables().then(setTables, toastError), []);
@@ -106,8 +107,16 @@ function DomainView({ domain, domains, tableName, qs, onSwitch, onDomainsChanged
   const table = (current && byName[current]) || (tables ?? []).find((t) => t.parent === null) || tables?.[0];
 
   const select = useCallback((name: string) => {
-    location.hash = `${encodeURIComponent(domain.name)}/${encodeURIComponent(name)}`;
+    location.hash = tableHash(domain.name, name);
     setSearch("");
+  }, [domain.name]);
+
+  // 全屏记录由地址栏驱动：链接用 #域/表/_id，打开新标签页就能直接看这条记录
+  const full: Target | null = recordId != null && tableName ? { table: tableName, id: recordId } : null;
+  const openFull = useCallback((t: Target) => {
+    setCreating(null);
+    setRecord(null);
+    location.hash = recordHash(domain.name, t.table, t.id);
   }, [domain.name]);
 
   const ctx = useMemo<AppCtx>(() => ({
@@ -116,13 +125,13 @@ function DomainView({ domain, domains, tableName, qs, onSwitch, onDomainsChanged
     byName,
     select,
     openRecord: (t) => (setCreating(null), setRecord(t)),
-    openFull: (t) => (setCreating(null), setRecord(null), setFull(t)),
+    openFull,
     openNew: (t, parentId) => (setRecord(null), setCreating({ table: t, parentId })),
     preview: (target) => {
       setPreview({ target });
       api.fileStatus([target.recordId]).then((s) => setPreview((p) => (p?.target === target ? { target, state: s[target.recordId]?.[target.field]?.[target.idx] } : p)), () => {});
     },
-  }), [domain.name, tables, byName, select]);
+  }), [domain.name, tables, byName, select, openFull]);
 
   const toggleTheme = () => {
     const next = theme === "dark" ? "light" : "dark";
@@ -131,15 +140,16 @@ function DomainView({ domain, domains, tableName, qs, onSwitch, onDomainsChanged
     setTheme(next);
   };
 
-  const toggleFeed = () => {
-    localStorage.setItem("dt-feed", feedOpen ? "0" : "1");
-    setFeedOpen(!feedOpen);
-  };
-
   return (
     <Ctx.Provider value={ctx}>
       <div className="flex h-full">
-        <Sidebar domain={domain} domains={domains} onSwitch={onSwitch} current={graphView ? "@graph" : inboxView ? "@inbox" : eventsView ? "@events" : table?.name ?? null} theme={theme} onTheme={toggleTheme} />
+        <Sidebar
+          domain={domain} domains={domains} onSwitch={onSwitch}
+          current={graphView ? "@graph" : inboxView ? "@inbox" : eventsView ? "@events" : table?.name ?? null}
+          theme={theme} onTheme={toggleTheme}
+          collapsed={!sidebarOpen} onCollapse={toggleSidebar}
+          feedOpen={feedOpen} onToggleFeed={toggleFeed}
+        />
         <main className="flex min-w-0 flex-1 flex-col">
           {tables === null ? (
             <div className="p-8 text-ink-3">连接 dt 服务…</div>
@@ -157,7 +167,7 @@ function DomainView({ domain, domains, tableName, qs, onSwitch, onDomainsChanged
             </div>
           ) : (
             <>
-              <TableHeader key={table.name} table={table} search={search} onSearch={setSearch} feedOpen={feedOpen} onToggleFeed={toggleFeed} />
+              <TableHeader key={table.name} table={table} search={search} onSearch={setSearch} />
               <div className="flex min-h-0 flex-1 flex-col border-t border-line bg-surface">
                 <Grid key={table.name} table={table} search={search} />
               </div>
@@ -167,57 +177,94 @@ function DomainView({ domain, domains, tableName, qs, onSwitch, onDomainsChanged
         {feedOpen && <Feed />}
       </div>
       {record && <RecordDrawer target={record} onClose={() => setRecord(null)} />}
-      {full && <FullScreenRecord key={`${full.table}:${full.id}`} target={full} onClose={() => setFull(null)} />}
+      {full && <FullScreenRecord key={`${full.table}:${full.id}`} target={full} onClose={() => (location.hash = tableHash(domain.name, full.table))} />}
       {creating && <NewRecordDrawer key={creating.table} tableName={creating.table} parentId={creating.parentId} onClose={() => setCreating(null)} />}
       {preview && <PreviewModal key={`${preview.target.recordId}:${preview.target.field}:${preview.target.idx}`} target={preview.target} state={preview.state} onClose={() => setPreview(null)} />}
+      <AskDialog />
       <Toasts />
     </Ctx.Provider>
   );
 }
 
-function TableHeader({ table, search, onSearch, feedOpen, onToggleFeed }: {
+/** 面板开关：记住用户的选择；窗口窄于 minWidth 时自动收起，变宽后恢复用户的选择。 */
+function usePanel(key: string, minWidth: number) {
+  const mq = useMemo(() => window.matchMedia(`(min-width: ${minWidth}px)`), [minWidth]);
+  const saved = useCallback(() => localStorage.getItem(key) !== "0", [key]);
+  const [open, setOpen] = useState(() => mq.matches && saved());
+  useEffect(() => {
+    const onChange = () => setOpen(mq.matches && saved());
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [mq, saved]);
+  const toggle = useCallback(() => setOpen((o) => (localStorage.setItem(key, o ? "0" : "1"), !o)), [key]);
+  return [open, toggle] as const;
+}
+
+function TableHeader({ table, search, onSearch }: {
   table: TableInfo;
   search: string;
   onSearch: (s: string) => void;
-  feedOpen: boolean;
-  onToggleFeed: () => void;
 }) {
   const { byName, select, openNew } = useApp();
-  const crumbs: TableInfo[] = [];
-  for (let t: TableInfo | undefined = table; t; t = t.parent ? byName[t.parent] : undefined) crumbs.unshift(t);
+  const ancestors: TableInfo[] = [];
+  for (let t = table.parent ? byName[table.parent] : undefined; t; t = t.parent ? byName[t.parent] : undefined) ancestors.unshift(t);
+  const desc = table.description ?? `${table.fields.length} 个字段${table.children.length ? ` · 子表 ${table.children.map((c) => tableLabel(byName[c], c)).join("、")}` : ""}`;
   return (
-    <header className="rise px-6 pt-5 pb-3">
-      <div className="flex items-center gap-1.5 font-mono text-[11px] text-ink-3">
-        {crumbs.map((t, i) => (
-          <span key={t.name} className="flex items-center gap-1.5">
-            {i > 0 && <span>/</span>}
-            <button type="button" onClick={() => select(t.name)} className={cx("hover:text-accent", t === table && "text-ink-2")}>{t.name}</button>
+    <header className="rise flex items-center gap-3 px-6 py-3">
+      <div className="flex min-w-0 shrink items-baseline gap-1.5">
+        {ancestors.map((t) => (
+          <span key={t.name} className="flex shrink-0 items-baseline gap-1.5 font-mono text-[11px] text-ink-3">
+            <button type="button" onClick={() => select(t.name)} className="hover:text-accent">{tableLabel(t, t.name)}</button>
+            <span>/</span>
           </span>
         ))}
-        <span className="ml-2 rounded-[3px] border border-line-strong px-1 text-[10px]">v{table.schema_version}</span>
-        {table.parent && <span className="rounded-[3px] border border-line-strong px-1 text-[10px]">{table.relation === "one_to_one" ? "一对一" : "一对多"} · {table.on_delete === "restrict" ? "限制删除" : "级联删除"}</span>}
+        <h1 className="truncate font-display text-[28px] leading-none">{tableLabel(table, table.name)}</h1>
       </div>
-      <div className="mt-1 flex items-end gap-4">
-        <div className="min-w-0">
-          <h1 className="truncate font-display text-[40px] leading-[1.05]">{tableLabel(table, table.name)}</h1>
-          <p className="mt-1 text-[12.5px] text-ink-3">
-            {table.description ?? `${table.fields.length} 个字段${table.children.length ? ` · 子表 ${table.children.map((c) => tableLabel(byName[c], c)).join("、")}` : ""}`}
-          </p>
-        </div>
-        <div className="ml-auto flex shrink-0 items-center gap-2">
-          <label className="flex h-8 w-[220px] items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2.5 focus-within:border-accent">
-            <Search size={13} className="text-ink-3" />
-            <input value={search} onChange={(e) => onSearch(e.target.value)} placeholder="搜索文本字段或 _id" className="w-full bg-transparent outline-none placeholder:text-ink-3" />
-          </label>
-          {!table.parent && (
-            <Btn kind="solid" onClick={() => openNew(table.name)} className="h-8 px-3"><Plus size={14} /> 新建记录</Btn>
-          )}
-          <Btn kind="line" onClick={onToggleFeed} title={feedOpen ? "收起动态" : "展开动态"} className="h-8">
-            {feedOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
-          </Btn>
-        </div>
+      {table.label && table.label !== table.name && <span className="shrink-0 font-mono text-[11px] text-ink-3">{table.name}</span>}
+      <span className="shrink-0 rounded-[3px] border border-line-strong px-1 font-mono text-[10px] text-ink-3">v{table.schema_version}</span>
+      {table.parent && <span className="shrink-0 rounded-[3px] border border-line-strong px-1 font-mono text-[10px] text-ink-3">{table.relation === "one_to_one" ? "一对一" : "一对多"} · {table.on_delete === "restrict" ? "限制删除" : "级联删除"}</span>}
+      <p className="min-w-0 flex-1 truncate text-[12.5px] text-ink-3" title={desc}>{desc}</p>
+      <div className="flex shrink-0 items-center gap-2">
+        <label className="flex h-8 w-[220px] items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2.5 focus-within:border-accent">
+          <Search size={13} className="text-ink-3" />
+          <input value={search} onChange={(e) => onSearch(e.target.value)} placeholder="搜索文本字段或 _id" className="w-full bg-transparent outline-none placeholder:text-ink-3" />
+        </label>
+        {!table.parent && (
+          <Btn kind="solid" onClick={() => openNew(table.name)} className="h-8 px-3"><Plus size={14} /> 新建记录</Btn>
+        )}
       </div>
     </header>
+  );
+}
+
+/** ask() 发起的确认框。Enter 确认，Esc 或点背景取消。 */
+function AskDialog() {
+  const q = useAsk();
+  useEffect(() => {
+    if (!q) return;
+    const key = (e: KeyboardEvent) => e.key === "Escape" && (e.stopPropagation(), q.resolve(false));
+    window.addEventListener("keydown", key, true);
+    return () => window.removeEventListener("keydown", key, true);
+  }, [q]);
+  if (!q) return null;
+  return (
+    <div className="fade-in fixed inset-0 z-50 flex items-center justify-center bg-[color-mix(in_oklab,var(--ink)_24%,transparent)]" onMouseDown={() => q.resolve(false)}>
+      <div role="alertdialog" aria-modal="true" className="rise w-[min(440px,calc(100vw-32px))] rounded-lg border border-line-strong bg-surface p-5 shadow-[var(--shadow)]" onMouseDown={(e) => e.stopPropagation()}>
+        <h2 className="text-[14px] font-medium break-words">{q.title}</h2>
+        {q.body && <p className="mt-2 text-[12.5px] leading-relaxed whitespace-pre-wrap text-ink-2">{q.body}</p>}
+        <div className="mt-5 flex justify-end gap-2">
+          <Btn kind="ghost" onClick={() => q.resolve(false)}>取消</Btn>
+          <button
+            type="button"
+            autoFocus
+            onClick={() => q.resolve(true)}
+            className="inline-flex h-7 items-center rounded-md bg-danger px-3 text-[12.5px] text-white hover:opacity-90"
+          >
+            {q.ok ?? "确定"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

@@ -40,6 +40,15 @@ export function fmtSize(n: number) {
 export const fieldLabel = (f: Field) => f.label || f.key;
 export const tableLabel = (t: TableInfo | undefined, name: string) => t?.label || name;
 
+/** 地址栏路由是 #域/表；带了 _id 就直接打开这条记录的全屏视图。 */
+export function tableHash(domain: string, table: string | null) {
+  return `#${encodeURIComponent(domain)}${table ? `/${encodeURIComponent(table)}` : ""}`;
+}
+
+export function recordHash(domain: string, table: string, id: number) {
+  return `${tableHash(domain, table)}/${id}`;
+}
+
 export function asList<T>(v: unknown): T[] {
   return v == null ? [] : Array.isArray(v) ? (v as T[]) : [v as T];
 }
@@ -104,6 +113,44 @@ export function useToasts() {
       return () => void toastListeners.delete(fn);
     },
     () => toasts,
+  );
+}
+
+// ---------- 确认框 ----------
+
+export interface Ask {
+  title: string;
+  body?: string;
+  ok?: string;
+  resolve: (yes: boolean) => void;
+}
+
+let asking: Ask | null = null;
+const askListeners = new Set<() => void>();
+
+/** 页面内的确认框，代替 window.confirm；同一时间只有一个，新的会把旧的当作取消。 */
+export function ask(title: string, opts: { body?: string; ok?: string } = {}) {
+  asking?.resolve(false);
+  return new Promise<boolean>((resolve) => {
+    asking = {
+      title, ...opts,
+      resolve: (yes) => {
+        asking = null;
+        askListeners.forEach((fn) => fn());
+        resolve(yes);
+      },
+    };
+    askListeners.forEach((fn) => fn());
+  });
+}
+
+export function useAsk() {
+  return useSyncExternalStore(
+    (fn) => {
+      askListeners.add(fn);
+      return () => void askListeners.delete(fn);
+    },
+    () => asking,
   );
 }
 

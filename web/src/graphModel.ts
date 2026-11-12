@@ -1,4 +1,4 @@
-import type { Change, GraphData, TableInfo } from "./api";
+import type { Change, Direction, GraphData, GraphEdge, TableInfo } from "./api";
 import { asList, recTitle } from "./util";
 
 /** 图上的节点：记录 r:<id>、操作者 a:<名字>、表 t:<表名>。x/y 由力导向布局写入。 */
@@ -18,6 +18,9 @@ export interface SimNode {
   dying?: number;
   x?: number;
   y?: number;
+  /** 固定位置（拖动时由 force-graph 设置，Alt+拖线时临时固定其他节点） */
+  fx?: number;
+  fy?: number;
 }
 
 /** 边。kind=link 时 field 是 link 字段，owner 是持有该字段的表；born / dying 用来做闪烁和淡出。 */
@@ -49,7 +52,9 @@ export interface Filters {
   view: "records" | "tables";
   tables: string[] | null;
   focus: number | null;
-  depth: number;
+  /** 焦点往外几跳，all 表示能连到的全部记录 */
+  depth: number | "all";
+  dir: Direction;
   off: string[];
   actors: string[];
   since: "" | "1h" | "24h";
@@ -64,7 +69,10 @@ const key = (kind: string, s: string, t: string, field = "") => `${kind}:${s}>${
 /** 边在「连线」开关里的名字：parent、actor、link:<表>.<字段>。 */
 export const edgeFilterKey = (l: SimLink) => (l.kind === "link" ? `link:${l.owner}.${l.field}` : l.kind);
 
-export function fromData(data: GraphData): Model {
+/** 接口返回的边对应的 SimLink.key。 */
+export const edgeKey = (e: GraphEdge) => key(e.kind, rid(e.source), rid(e.target), e.field);
+
+export function fromData(data: Pick<GraphData, "seq" | "total" | "truncated" | "nodes" | "edges" | "touches">): Model {
   const m: Model = { seq: data.seq, total: data.total, truncated: data.truncated, nodes: new Map(), edges: new Map(), touches: new Map(), actors: new Map() };
   const tableOf = new Map<number, string>();
   for (const n of data.nodes) {
@@ -93,6 +101,14 @@ function linkTargets(table: TableInfo | undefined, rec: Record<string, unknown>)
     if (f.type === "link") for (const v of asList<number>(rec[f.key])) out.push({ field: f.key, target: rid(v) });
   }
   return out;
+}
+
+/** 这条变更会不会改变 m 里记录的关联：改的是 m 里的记录，或者新的父记录、link 指向 m 里的记录。 */
+export function relatesTo(m: Model, c: Change, byName: Record<string, TableInfo>) {
+  if (c.record_id != null && m.nodes.has(rid(c.record_id))) return true;
+  const rec = c.after;
+  if (!rec) return false;
+  return m.nodes.has(rid(rec._parent_id ?? -1)) || linkTargets(byName[c.table_name], rec).some((x) => m.nodes.has(x.target));
 }
 
 export interface Effect {
@@ -173,7 +189,7 @@ export function purge(m: Model, now: number) {
 
 const WINDOW: Record<string, number> = { "1h": 3600e3, "24h": 86400e3 };
 
-/** 按筛选条件算出当前要画的节点和边；节点对象跨次复用，布局位置不会丢。 */
+/** 按筛选条件算出当前要画的节点和边；节点对象跨次复用，布局位置不会丢。焦点由接口算好，m 已经只含关联记录。 */
 export function visible(m: Model, f: Filters) {
   const off = new Set(f.off);
   const since = f.since ? Date.now() - WINDOW[f.since] : 0;
@@ -184,7 +200,7 @@ export function visible(m: Model, f: Filters) {
     if (wanted && !wanted.some((map) => map.has(id))) continue;
     nodes.set(id, n);
   }
-  let links: SimLink[] = [];
+  const links: SimLink[] = [];
   for (const e of m.edges.values()) {
     if (!off.has(edgeFilterKey(e)) && nodes.has(endId(e.source)) && nodes.has(endId(e.target))) links.push(e);
   }
@@ -205,34 +221,10 @@ export function visible(m: Model, f: Filters) {
     }
   }
 
-  const adj = new Map<string, Set<string>>();
-  const link = (a: string, b: string) => {
-    if (!adj.has(a)) adj.set(a, new Set());
-    adj.get(a)!.add(b);
-  };
-  for (const e of links) link(endId(e.source), endId(e.target)), link(endId(e.target), endId(e.source));
-
-  let missingFocus = false;
-  if (f.focus != null) {
-    const start = rid(f.focus);
-    const seen = new Set<string>();
-    if (nodes.has(start)) {
-      seen.add(start);
-      let frontier = [start];
-      for (let d = 0; d < f.depth && frontier.length; d++) {
-        const next: string[] = [];
-        for (const id of frontier) for (const n of adj.get(id) ?? []) if (!seen.has(n)) (seen.add(n), next.push(n));
-        frontier = next;
-      }
-    } else missingFocus = true;
-    for (const id of [...nodes.keys()]) if (!seen.has(id)) nodes.delete(id);
-    links = links.filter((e) => seen.has(endId(e.source)) && seen.has(endId(e.target)));
-  }
-
   for (const n of nodes.values()) n.deg = 0;
   for (const e of links) (nodes.get(endId(e.source))!.deg! += 1), (nodes.get(endId(e.target))!.deg! += 1);
   curve(links);
-  return { nodes: [...nodes.values()], links, missingFocus };
+  return { nodes: [...nodes.values()], links };
 }
 
 /** 同一对节点之间有多条边、或自己连自己时，给每条边不同的弧度，避免重叠。 */
@@ -263,7 +255,8 @@ export function readFilters(qs: string, totalRecords: number): Filters {
     view: view === "tables" || view === "records" ? view : totalRecords > 1500 ? "tables" : "records",
     tables: p.has("tables") && list("tables").length ? list("tables") : null,
     focus: p.has("focus") && /^\d+$/.test(p.get("focus")!) ? Number(p.get("focus")) : null,
-    depth: Math.min(3, Math.max(1, Number(p.get("depth")) || 2)),
+    depth: p.get("depth") === "all" ? "all" : Math.min(3, Math.max(1, Number(p.get("depth")) || 2)),
+    dir: p.get("dir") === "out" || p.get("dir") === "in" ? (p.get("dir") as Direction) : "both",
     off: p.has("off") ? list("off") : ["actor"],
     actors: list("actors"),
     since: since === "1h" || since === "24h" ? since : "",
@@ -277,6 +270,7 @@ export function writeFilters(f: Filters) {
   if (f.tables) p.set("tables", f.tables.join(","));
   if (f.focus != null) p.set("focus", String(f.focus));
   if (f.depth !== 2) p.set("depth", String(f.depth));
+  if (f.dir !== "both") p.set("dir", f.dir);
   if (f.off.join(",") !== "actor") p.set("off", f.off.join(","));
   if (f.actors.length) p.set("actors", f.actors.join(","));
   if (f.since) p.set("since", f.since);

@@ -1,6 +1,6 @@
 import {
   flexRender, getCoreRowModel, useReactTable,
-  type ColumnDef, type SortingState,
+  type ColumnDef, type ColumnSizingState, type SortingState,
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Maximize2, Plus, RefreshCw } from "lucide-react";
@@ -31,6 +31,31 @@ const savedPageSize = () => {
   return PAGE_SIZES.includes(n) ? n : 100;
 };
 
+/** 每张表各自记住列宽和排序；排序里已经不存在的列会被丢掉，免得服务端报错。 */
+function savedView(key: string, table: TableInfo): { sorting: SortingState; sizing: ColumnSizingState } {
+  try {
+    const v = JSON.parse(localStorage.getItem(key) ?? "{}");
+    const ids = new Set([...table.fields.map((f) => f.key), PARENT, UPDATED]);
+    return {
+      sorting: Array.isArray(v.sorting) ? v.sorting.filter((s: { id: string }) => ids.has(s.id)) : [],
+      sizing: v.sizing && typeof v.sizing === "object" ? v.sizing : {},
+    };
+  } catch {
+    return { sorting: [], sizing: {} };
+  }
+}
+
+/** 刷新页面后还要记得哪些行是展开的；行内子表随父行一起开关，不单独记。 */
+function savedExpanded(key: string | null): number[] {
+  if (!key) return [];
+  try {
+    const v = JSON.parse(localStorage.getItem(key) ?? "[]");
+    return Array.isArray(v) ? v.filter((n): n is number => typeof n === "number") : [];
+  } catch {
+    return [];
+  }
+}
+
 export function Grid({ table, parentId, search = "", compact }: {
   table: TableInfo;
   parentId?: number | null;
@@ -38,7 +63,15 @@ export function Grid({ table, parentId, search = "", compact }: {
   compact?: boolean;
 }) {
   const { domain, byName, openRecord, openFull, openNew } = useApp();
-  const [sorting, setSorting] = useState<SortingState>([]);
+  const viewKey = `dt-view:${domain}/${table.name}`;
+  const [initial] = useState(() => savedView(viewKey, table));
+  const [sorting, setSorting] = useState<SortingState>(initial.sorting);
+  const [sizing, setSizing] = useState<ColumnSizingState>(initial.sizing);
+  // 拖动列宽时每帧都会变，停下来再写
+  useEffect(() => {
+    const t = setTimeout(() => localStorage.setItem(viewKey, JSON.stringify({ sorting, sizing })), 300);
+    return () => clearTimeout(t);
+  }, [viewKey, sorting, sizing]);
   // 搜索框每敲一个字都会变，停顿 250ms 再查服务端
   const [query, setQuery] = useState(search);
   useEffect(() => {
@@ -52,7 +85,14 @@ export function Grid({ table, parentId, search = "", compact }: {
   const pages = Math.max(1, Math.ceil(total / pageSize));
   const [active, setActive] = useState<{ id: number; key: string } | null>(null);
   const [editing, setEditing] = useState<{ id: number; key: string; initial?: string } | null>(null);
-  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  // 整表页面（parentId 为空）记住展开的行，刷新后还在；抽屉、行内子表里的是临时视图
+  const expandedKey = parentId == null ? `dt-expanded:${domain}/${table.name}` : null;
+  const [expanded, setExpanded] = useState<Set<number>>(() => new Set(savedExpanded(expandedKey)));
+  useEffect(() => {
+    if (!expandedKey) return;
+    const t = setTimeout(() => localStorage.setItem(expandedKey, JSON.stringify([...expanded])), 300);
+    return () => clearTimeout(t);
+  }, [expandedKey, expanded]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [viewW, setViewW] = useState(800);
   const showParent = table.parent !== null && parentId == null;
@@ -67,7 +107,14 @@ export function Grid({ table, parentId, search = "", compact }: {
     return () => ro.disconnect();
   }, [rows === null]); // 加载完成前渲染的是骨架屏，scrollRef 还没挂上
 
+  // 换表、翻页、改搜索或排序时清掉选中和编辑态；展开集合只在这些变化时清空，
+  // 首次挂载时保留从 localStorage 恢复的展开状态（StrictMode 下 effect 会跑两次，所以比的是值）
+  const lastView = useRef({ table: table.name, parentId, page });
   useEffect(() => {
+    const v = { table: table.name, parentId, page };
+    const prev = lastView.current;
+    if (prev.table === v.table && prev.parentId === v.parentId && prev.page === v.page) return;
+    lastView.current = v;
     setActive(null);
     setEditing(null);
     setExpanded(new Set());
@@ -97,8 +144,9 @@ export function Grid({ table, parentId, search = "", compact }: {
   const rt = useReactTable({
     data: rows ?? [],
     columns,
-    state: { sorting },
+    state: { sorting, columnSizing: sizing },
     onSortingChange: setSorting,
+    onColumnSizingChange: setSizing,
     manualSorting: true, // 排序在服务端，对全部记录生效，不只是当前页
     getCoreRowModel: getCoreRowModel(),
     getRowId: (r) => String(r._id),

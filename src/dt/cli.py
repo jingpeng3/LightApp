@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import subprocess
@@ -22,6 +23,7 @@ field_app = typer.Typer(help="字段", no_args_is_help=True)
 rec_app = typer.Typer(help="记录数据", no_args_is_help=True)
 event_app = typer.Typer(help="记录事件与订阅绑定", no_args_is_help=True)
 inbox_app = typer.Typer(help="收件箱", no_args_is_help=True)
+graph_app = typer.Typer(help="知识图谱：记录之间的父子和 link 关联", no_args_is_help=True)
 domain_app = typer.Typer(help="域：一组表的命名空间", no_args_is_help=True)
 app.add_typer(domain_app, name="domain")
 app.add_typer(table_app, name="table")
@@ -29,6 +31,7 @@ app.add_typer(field_app, name="field")
 app.add_typer(rec_app, name="rec")
 app.add_typer(event_app, name="event")
 app.add_typer(inbox_app, name="inbox")
+app.add_typer(graph_app, name="graph")
 
 
 def port() -> int:
@@ -152,6 +155,8 @@ def serve(port_: int = typer.Option(None, "--port", help="默认 $DT_PORT 或 86
 
     from dt.server import create_app
 
+    # 事件投递的触发和结果走 logging；没配 handler 时 INFO 不会输出
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s")
     uvicorn.run(create_app(), host="127.0.0.1", port=port_ or port(), log_level="info")
 
 
@@ -360,6 +365,12 @@ def rec_delete(table: str, record_id: int, domain: DomainOpt = None, actor: Acto
     run("DELETE", f"{dpath(domain)}/tables/{table}/records/{record_id}", domain=domain, actor=need_actor(actor))
 
 
+@rec_app.command("impact")
+def rec_impact(table: str, record_id: int, domain: DomainOpt = None):
+    """删除前预览：cascade 会一起删的子记录，unlink 会被去掉引用的记录，blocked 非空时删不掉。"""
+    run("GET", f"{dpath(domain)}/tables/{table}/records/{record_id}/impact", domain=domain)
+
+
 @app.command()
 def history(
     domain: DomainOpt = None,
@@ -441,6 +452,7 @@ def event_bind(
     field: str = typer.Option(None, "--field", help="只看该字段实际变化；需要 --table"),
     where: str = typer.Option(None, "--where", help="变化后的值满足的条件 JSON / @file / -"),
     where_before: str = typer.Option(None, "--where-before", help="变化前的值满足的条件 JSON / @file / -"),
+    prompt: str = typer.Option(None, "--prompt", help="随投递一起给消费方的提示词，支持 ${record.title} 等模板"),
     action: str = typer.Option(..., "--action", help="webhook / command / write / inbox"),
     config: str = typer.Option(..., "--config", help="动作配置 JSON / @file / -"),
     disabled: bool = typer.Option(False, "--disabled", help="先建好但不启用"),
@@ -452,6 +464,8 @@ def event_bind(
     command: --config '{"cmd":"cat >> /tmp/dt-events.jsonl"}'
     write:   --config '{"table":"task_log","parent_id":"${event.record_id}","data":{"content":"状态变更"}}'
     inbox:   --config '{"title":"${record.title} 完成了","body":"${fields.status.before} → ${fields.status.after}"}'
+
+    --prompt 会随动作投递：webhook 的 payload.prompt、command 的 DT_PROMPT 环境变量、inbox 消息的 prompt。
     """
     body = {
         "name": name,
@@ -460,6 +474,7 @@ def event_bind(
         "field": field,
         "where": load_json(where, "--where") if where else None,
         "where_before": load_json(where_before, "--where-before") if where_before else None,
+        "prompt": prompt,
         "action": action,
         "config": load_json(config, "--config"),
         "enabled": not disabled,
@@ -483,6 +498,7 @@ def event_update(
     field: str = typer.Option(None, "--field", help="字段；传空字符串表示任意字段"),
     where: str = typer.Option(None, "--where", help="变化后的条件；传空字符串表示清除"),
     where_before: str = typer.Option(None, "--where-before", help="变化前的条件；传空字符串表示清除"),
+    prompt: str = typer.Option(None, "--prompt", help="提示词；传空字符串表示清除"),
     action: str = typer.Option(None, "--action", help="webhook / command / write / inbox"),
     config: str = typer.Option(None, "--config", help="动作配置 JSON / @file / -"),
     enabled: bool | None = typer.Option(None, "--enabled/--disabled", help="启用或停用"),
@@ -500,6 +516,8 @@ def event_update(
         body["where"] = load_json(where, "--where") if where else None
     if where_before is not None:
         body["where_before"] = load_json(where_before, "--where-before") if where_before else None
+    if prompt is not None:
+        body["prompt"] = prompt or None
     if action is not None:
         body["action"] = action
     if config is not None:
@@ -574,6 +592,152 @@ def inbox_read_all(domain: DomainOpt = None, actor: ActorOpt = None):
 def inbox_delete(message_id: int, domain: DomainOpt = None, actor: ActorOpt = None):
     """删除一条收件箱消息。"""
     run("DELETE", f"{dpath(domain)}/inbox/{message_id}", domain=domain, actor=need_actor(actor))
+
+
+# ---------- graph ----------
+
+KindsOpt = Annotated[str | None, typer.Option("--kinds", help="只走这些连线，逗号分隔：parent、link、link:<表>.<字段>")]
+DirOpt = Annotated[str, typer.Option("--direction", help="both；out 沿父→子、引用方→被引用方；in 反过来")]
+
+
+def _graph_params(**kw) -> dict:
+    return {k: v for k, v in kw.items() if v is not None}
+
+
+FmtOpt = Annotated[str, typer.Option("--format", help="json、table、mermaid 或 dot")]
+FieldsOpt = Annotated[str | None, typer.Option("--fields", help="每条记录带上字段数据：* 表示全部，或逗号分隔的字段 key")]
+
+
+def _json_param(value: str | None, what: str) -> str | None:
+    """--where / --done 支持 JSON、@文件、-，原样转成查询串。"""
+    return None if value is None else json.dumps(load_json(value, what), ensure_ascii=False)
+
+
+def _graph_get(path: str, params: dict, domain: str | None, fmt: str, table=None):
+    """--format mermaid/dot 由服务端渲染，直接输出文本；table 给出时把 data 转成表格行。"""
+    if fmt in ("mermaid", "dot"):
+        params = {**params, "format": fmt}
+    elif fmt not in ("json", "table") or (fmt == "table" and table is None):
+        fail(DtError("invalid_input", f"--format 不支持 {fmt}", "可用：json、mermaid、dot" + ("、table" if table else "")))
+    resp = call("GET", f"{dpath(domain)}{path}", params=params)
+    if resp.get("ok") and fmt in ("mermaid", "dot"):
+        typer.echo(resp["data"]["text"], nl=False)
+        return
+    if resp.get("ok") and fmt == "table":
+        rows, note = table(resp["data"])
+        typer.echo(render_table(rows))
+        typer.echo(f"({note}，域 {domain})")
+        return
+    emit({"ok": resp.get("ok"), "domain": domain, **resp})
+
+
+@graph_app.command("related")
+def graph_related(
+    ids: list[int] = typer.Argument(None, help="起点记录 _id，可以多个"),
+    domain: DomainOpt = None,
+    by: str = typer.Option(None, "--by", help="把这个操作者 insert / update 过的记录也作为起点"),
+    depth: str = typer.Option("1", "--depth", help="跳数，all 表示不限"),
+    direction: DirOpt = "both",
+    kinds: KindsOpt = None,
+    tables: str = typer.Option(None, "--tables", help="只经过这些表，逗号分隔"),
+    limit: int = typer.Option(500, "--limit", help="最多返回多少条记录，超出时 truncated 为 true"),
+    where: str = typer.Option(None, "--where", "-w", help="只返回满足条件的记录（查询 DSL，JSON / @file / -），不影响遍历；起点总是保留"),
+    since: int = typer.Option(None, "--since", help="只返回 seq 大于它之后被 insert / update 过的记录，每条带 changed 汇总"),
+    fields: FieldsOpt = None,
+    fmt: FmtOpt = "json",
+):
+    """从一条或多条记录出发，找出所有关联的记录；每条带 depth（几跳）和 via（经哪条边到达）。"""
+    params = _graph_params(ids=",".join(map(str, ids or [])) or None, actor=by, depth=depth, direction=direction,
+                           kinds=kinds, tables=tables, limit=limit, where=_json_param(where, "--where"), since=since, fields=fields)
+
+    def table(data):
+        rows = [{"depth": n["depth"], "table": n["table"], "_id": n["id"], "title": n["title"], "via": _via(n["via"]),
+                 **({"changed": _changed(n["changed"])} if "changed" in n else {})} for n in data["nodes"]]
+        return sorted(rows, key=lambda r: (r["depth"], r["table"], r["_id"])), f"{len(rows)} 条{'，已截断' if data['truncated'] else ''}"
+
+    _graph_get("/graph/related", params, domain, fmt, table)
+
+
+def _changed(c: dict | None) -> str:
+    if not c:
+        return ""
+    return f"{c['count']} 次 · {'、'.join(map(str, c['actors']))}" + (f" · {'、'.join(c['fields'])}" if c["fields"] else "")
+
+
+def _via(v: dict | None) -> str:
+    if v is None:
+        return "起点"
+    edge = "父子" if v["kind"] == "parent" else v["field"]
+    return f"#{v['from']} {'→' if v['dir'] == 'out' else '←'} {edge}"
+
+
+@graph_app.command("path")
+def graph_path(source: int, target: int, domain: DomainOpt = None, direction: DirOpt = "both", kinds: KindsOpt = None,
+               fmt: Annotated[str, typer.Option("--format", help="json、mermaid 或 dot")] = "json"):
+    """两条记录之间最短的关联路径。"""
+    _graph_get("/graph/path", _graph_params(source=source, target=target, direction=direction, kinds=kinds), domain, fmt)
+
+
+@graph_app.command("lint")
+def graph_lint(domain: DomainOpt = None, tables: str = typer.Option(None, "--tables", help="只检查这些表"),
+               limit: int = typer.Option(200, "--limit", help="每类最多列出多少条")):
+    """检查悬空引用（link 指向的记录不存在）、孤立记录（没有任何关联）和自引用 link 字段里的依赖环。"""
+    run("GET", f"{dpath(domain)}/graph/lint", params=_graph_params(tables=tables, limit=limit), domain=domain)
+
+
+DepOpt = Annotated[str, typer.Option("--field", help="表示依赖的 link 字段，写成 <表>.<字段>，如 task.needs（持有方依赖被引用方）")]
+DoneOpt = Annotated[str | None, typer.Option("--done", help="「已完成」的条件（查询 DSL），如 '{\"status\":\"完成\"}'")]
+
+
+@graph_app.command("ready")
+def graph_ready(
+    domain: DomainOpt = None,
+    field: DepOpt = ...,
+    done: DoneOpt = ...,
+    where: str = typer.Option(None, "--where", "-w", help="只看满足条件的候选记录，如只看派给自己的"),
+    limit: int = typer.Option(200, "--limit", help="ready 和 blocked 各最多列出多少条"),
+    fields: FieldsOpt = None,
+    fmt: Annotated[str, typer.Option("--format", help="json 或 table")] = "json",
+):
+    """现在可以开工的记录：自己没完成、依赖全部完成；blocked 列出还在等的依赖。"""
+    params = _graph_params(field=field, done=_json_param(done, "--done"), where=_json_param(where, "--where"), limit=limit, fields=fields)
+
+    def table(data):
+        rows = [{"state": "ready", "table": n["table"], "_id": n["id"], "title": n["title"], "waiting": ""} for n in data["ready"]["items"]]
+        rows += [{"state": "blocked" + ("（环）" if n["in_cycle"] else ""), "table": n["table"], "_id": n["id"], "title": n["title"],
+                  "waiting": ", ".join(f"#{w['id']} {w['title']}" for w in n["waiting"])} for n in data["blocked"]["items"]]
+        return rows, f"可开工 {data['ready']['total']}，等待中 {data['blocked']['total']}，已完成 {data['done']}"
+
+    _graph_get("/graph/ready", params, domain, fmt, table)
+
+
+@graph_app.command("order")
+def graph_order(
+    ids: list[int] = typer.Argument(None, help="只排这些记录和它们依赖的记录；省略表示整张表"),
+    domain: DomainOpt = None,
+    field: DepOpt = ...,
+    done: DoneOpt = None,
+    fmt: Annotated[str, typer.Option("--format", help="json 或 table")] = "json",
+):
+    """按依赖排出先后：被依赖的在前，level 相同的可以并行；成环的放进 cycles。"""
+    params = _graph_params(field=field, ids=",".join(map(str, ids or [])) or None, done=_json_param(done, "--done"))
+
+    def table(data):
+        rows = [{"level": n["level"], "table": n["table"], "_id": n["id"], "title": n["title"],
+                 "needs": ", ".join(f"#{x}" for x in n["needs"])} for n in data["order"]]
+        note = f"{len(rows)} 条" + ("" if data["complete"] else f"，{len(data['stuck'])} 条因为依赖环排不出来")
+        return rows, note
+
+    _graph_get("/graph/order", params, domain, fmt, table)
+
+
+@graph_app.command("hubs")
+def graph_hubs(domain: DomainOpt = None, tables: str = typer.Option(None, "--tables", help="只看这些表的记录"),
+               kinds: KindsOpt = None, limit: int = typer.Option(20, "--limit"),
+               fmt: Annotated[str, typer.Option("--format", help="json 或 table")] = "json"):
+    """连接最多的记录（枢纽），in 是指向它的边，out 是它发出的边。"""
+    _graph_get("/graph/hubs", _graph_params(tables=tables, kinds=kinds, limit=limit), domain, fmt,
+               lambda data: (data["items"], f"{len(data['items'])} / {data['total']} 条有关联"))
 
 
 # ---------- 表格输出 ----------

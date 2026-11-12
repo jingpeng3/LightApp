@@ -1,7 +1,8 @@
 import { Check, ExternalLink } from "lucide-react";
 import type { Attachment, Field, FileState, Rec } from "../api";
-import { asList, cx } from "../util";
+import { asList, cx, recordHash } from "../util";
 import { AttachmentChip } from "./attachments";
+import { LinkText } from "./linkText";
 import { Tag, useApp } from "./ui";
 
 export function optionColor(f: Field, value: string) {
@@ -15,7 +16,7 @@ export function CellView({ field: f, value, rec, states }: {
   rec: Rec;
   states?: FileState[];
 }) {
-  const { openRecord } = useApp();
+  const { openRecord, domain } = useApp();
   if (f.type === "checkbox") {
     return (
       <span className={cx("inline-flex size-[15px] items-center justify-center rounded-[3px] border", value ? "border-accent bg-accent text-surface" : "border-line-strong")}>
@@ -42,7 +43,7 @@ export function CellView({ field: f, value, rec, states }: {
       return <span className="font-mono text-ink-2">{new Date(String(value)).toLocaleString("zh-CN", { hour12: false })}</span>;
     case "url":
       return (
-        <a href={String(value)} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className="inline-flex min-w-0 items-center gap-1 text-accent hover:underline">
+        <a href={String(value)} target="_blank" rel="noopener noreferrer" title={String(value)} onClick={(e) => e.stopPropagation()} className="inline-flex w-full min-w-0 items-center gap-1 text-accent hover:underline">
           <span className="truncate">{String(value).replace(/^https?:\/\//, "")}</span>
           <ExternalLink size={11} className="shrink-0" />
         </a>
@@ -62,14 +63,25 @@ export function CellView({ field: f, value, rec, states }: {
       return (
         <span className="flex min-w-0 gap-1 overflow-hidden">
           {asList<number>(value).map((id) => (
-            <button
-              key={id}
-              type="button"
-              onClick={(e) => (e.stopPropagation(), openRecord({ table: f.config!.table!, id }))}
-              className="h-[20px] shrink-0 rounded-[4px] border border-line-strong px-1.5 font-mono text-[11.5px] text-ink-2 hover:border-accent hover:text-accent"
-            >
-              {f.config!.table}#{id}
-            </button>
+            <span key={id} className="inline-flex h-[20px] shrink-0 items-center rounded-[4px] border border-line-strong font-mono text-[11.5px] text-ink-2 hover:border-accent hover:text-accent">
+              <button
+                type="button"
+                onClick={(e) => (e.stopPropagation(), openRecord({ table: f.config!.table!, id }))}
+                className="h-full pr-0.5 pl-1.5"
+              >
+                {f.config!.table}#{id}
+              </button>
+              <a
+                href={recordHash(domain, f.config!.table!, id)}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="在新标签页打开"
+                onClick={(e) => e.stopPropagation()}
+                className="flex h-full items-center pr-1 pl-0.5 text-ink-3 hover:text-accent"
+              >
+                <ExternalLink size={10} />
+              </a>
+            </span>
           ))}
         </span>
       );
@@ -82,7 +94,11 @@ export function CellView({ field: f, value, rec, states }: {
         </span>
       );
     case "long_text":
-      return <span className="truncate text-ink-2">{String(value).split("\n")[0]}</span>;
+      return (
+        <span className="block truncate text-ink-2" title={String(value)}>
+          <LinkText text={String(value).split("\n")[0]} />
+        </span>
+      );
     default:
       return <span className="truncate">{String(value)}</span>;
   }

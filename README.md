@@ -12,7 +12,7 @@ dt 是一个本机运行的动态表格。Agent 通过 Skill 学会用法，用 
 - **事件绑定**：记录变化时触发 webhook、本机命令、写回记录或收件箱消息，at-least-once 投递并自动重试。
 - **知识图谱**：记录是节点，父子关系和 link 字段是边，实时显示哪个 agent 改了什么，可按表、焦点、操作者、时间筛选。
 
-完整设计见 [docs/design.md](docs/design.md)。
+能力介绍（含 TEAMS 实战案例）见 [docs/introduction.md](docs/introduction.md)，完整设计见 [docs/design.md](docs/design.md)。
 
 ## 安装
 

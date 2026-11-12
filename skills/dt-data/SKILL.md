@@ -1,6 +1,6 @@
 ---
 name: dt-data
-description: 用 dt CLI 读写动态表格里的数据：先查域、再按描述挑表、看字段说明，然后查询、插入（含子表嵌套、批量）、更新、删除、挂附件（agent 产出物的绝对路径）、看变更历史。用户说「记一条任务」「查一下进行中的任务」「把任务改成完成」「写一条日志」「把产出物挂到任务上」「看看某个项目里有什么数据」时使用。建域、建表、改字段用 dt-schema。
+description: 用 dt CLI 读写动态表格里的数据：先查域、再按描述挑表、看字段说明，然后查询、插入（含子表嵌套、批量）、更新、删除、挂附件（agent 产出物的绝对路径）、看变更历史、查记录之间的关联。用户说「记一条任务」「查一下进行中的任务」「把任务改成完成」「写一条日志」「把产出物挂到任务上」「看看某个项目里有什么数据」「这个任务关联了哪些东西」「谁引用了它」时使用。建域、建表、改字段用 dt-schema。
 ---
 
 # dt 数据操作
@@ -67,13 +67,57 @@ dt rec update task 12 -D proj_a -A claude --set '{"status":"完成"}' --if-versi
 dt rec attach task 12 output /abs/path/report.md /abs/path/site -D proj_a -A claude   # 追加
 dt rec update task 12 -D proj_a -A claude --set '{"output":["/abs/path/report.md"]}'  # 整体替换
 
-dt rec delete task 12 -D proj_a -A claude       # 子记录按 on_delete 级联删除
+dt rec impact task 12 -D proj_a                 # 删除前预览：会级联删哪些、会改掉谁的引用、是否被 restrict 挡住
+dt rec delete task 12 -D proj_a -A claude       # 子记录按 on_delete 级联删除；返回里的 unlinked 是被去掉引用的记录
 dt history -D proj_a --table task --id 12       # 这条记录的变更历史
 ```
 
 `--data`、`--set`、`--where` 都可以写 JSON 字符串、`@文件路径` 或 `-`（从 stdin 读）。内容复杂或含引号时写到文件里用 `@file.json`。查询语法见 [references/query.md](references/query.md)。
 
-### 5. 订阅记录变化（需要时）
+### 5. 查关联（需要时）
+
+记录之间的关系有两种：父子（`_parent_id`）和 link 字段。`dt graph` 在整个域上沿这些关系查找，不用自己一层层 query。
+
+```bash
+dt graph related 12 -D proj_a                              # 和 12 直接相连的记录（1 跳）
+dt graph related 12 -D proj_a --depth all --format table   # 能连到的所有记录
+dt graph related 12 -D proj_a --direction in --kinds link  # 谁引用了 12
+dt graph related 12 -D proj_a --direction out --kinds link:task.needs --depth all   # 12 依赖的整条链
+dt graph related -D proj_a --by codex --depth 0            # codex 写过的记录
+dt graph path 12 7 -D proj_a                               # 两条记录之间最短的关联路径
+dt graph lint -D proj_a                                    # 悬空引用、孤立记录、依赖环
+dt graph hubs -D proj_a --format table                     # 连接最多的记录
+```
+
+- `--direction`：`out` 沿父→子、引用方→被引用方走；`in` 反过来；默认 `both`。
+- `--kinds`：`parent`、`link`（全部 link 字段）、`link:<表>.<字段>`，逗号分隔。`--tables` 限定只经过哪些表。
+- 返回的每条记录带 `depth`（离起点几跳）和 `via`（经哪条边、从哪条记录到达）。超过 `--limit`（默认 500）时 `truncated` 为 true，缩小 depth 或加 kinds、tables 再查。
+
+把关联记录当上下文用时，直接带上数据、按条件筛，不用再逐条 `rec get`：
+
+```bash
+dt graph related 12 -D proj_a --depth all --fields '*'                         # 每条带完整字段（data）
+dt graph related 12 -D proj_a --depth all --fields title,status --where '{"status":{"ne":"完成"}}'   # 只要没完成的
+dt graph related 12 -D proj_a --depth 2 --since 1042 --format table            # seq 1042 之后周边谁被改过（带 changed 汇总）
+dt graph related 12 -D proj_a --depth all --format mermaid                     # 导出成 Mermaid，贴进文档；也可以 --format dot
+```
+
+- `--where` 用查询 DSL，只筛返回的记录，不挡遍历；起点总是保留。字段只在部分表里有时，其他表的记录算不满足。
+- `--since` 的 seq 来自上次返回的 `seq`，或 `dt event list` 的游标。
+
+### 依赖（自引用的 link，如 `task.needs → task`）
+
+```bash
+dt graph ready -D proj_a --field task.needs --done '{"status":"完成"}' --format table   # 现在能开工的；blocked 列出还在等谁
+dt graph ready -D proj_a --field task.needs --done '{"status":"完成"}' --where '{"_created_by":"claude"}'   # 只看 claude 建的
+dt graph order -D proj_a --field task.needs --done '{"status":"完成"}' --format table   # 拓扑序，level 相同可并行
+dt graph order 12 -D proj_a --field task.needs          # 只排 12 和它（间接）依赖的
+```
+
+- `--field` 写 `<表>.<字段>`，持有方依赖被引用方。`--done` 是「已完成」的条件，必填（`ready`）。
+- 依赖成环时 `ready` 里对应记录 `in_cycle` 为 true，`order` 把它们放进 `cycles` / `stuck`，`lint` 的 `cycles` 也会列出；把环上某条的依赖去掉再排。
+
+### 6. 订阅记录变化（需要时）
 
 `dt event` 只订阅记录的 `insert` / `update` / `delete`，事件带字段级 `fields`（before/after），表结构变化不算事件。
 
@@ -83,22 +127,10 @@ dt event list -D proj_a --table task --field status --op update --since 100
 
 # 持续监听，每行一个 JSON；按 seq 游标续拉，不会漏
 dt event watch -D proj_a --table task --field status --op update --since 100 --timeout 60
-
-# 绑定动作（写入命令要 -A）
-dt event bind -D proj_a notify-done -A claude --on update --table task --field status \
-  --where '{"status":"完成"}' --action webhook --config '{"url":"http://127.0.0.1:9000/hook"}'
-dt event bind -D proj_a auto-log -A claude --on update --table task --field status \
-  --action write --config '{"table":"task_log","parent_id":"${event.record_id}","data":{"content":"状态已更新"}}'
-dt event binds -D proj_a
-dt event deliveries -D proj_a notify-done [--status failed]
-dt event retry -D proj_a notify-done
 ```
 
-- `where` 看变化后的记录（delete 看变化前），`--where-before` 看变化前；两者都和查询 DSL 一样。
-- `write` 的 `data` 字符串里可用 `${event.record_id}`、`${event.seq}`、`${record.title}`、`${fields.status.after}`。
-- 同一事务、同一绑定的事件会合并成一条投递；一次命令/一次 webhook 可能收到多条事件。command 的 stdin 是 JSONL（每行一条事件），webhook 的 `events` 是数组。config 里可用 `batch`（默认 20，一次动作合并几条投递）和 `max_pending`（默认 50000）。
-- 绑定会执行 webhook 或本机命令；**用户没有明确要求时不要创建绑定**。创建前把动作、目标地址和执行内容告诉用户确认。
-- 更完整的订阅创建、修改、启停、投递重试用 **dt-event-bind**；持续消费事件流用 **dt-event-consume**。
+- 「状态变成完成时通知/写日志/放进收件箱」这类自动动作是**绑定**，用 **dt-event-bind**。绑定会执行 webhook 或本机命令，用户没有明确要求时不要创建。
+- 按游标持续消费事件、读收件箱用 **dt-event-consume**。
 
 ## 规则
 
@@ -106,5 +138,5 @@ dt event retry -D proj_a notify-done
 - `_` 开头的是只读系统字段（`_id` `_parent_id` `_version` `_created_at` `_updated_at` `_created_by` `_updated_by`），可以用来查询和排序。
 - 人可能同时在页面上编辑同一条记录。先读后改时把读到的 `_version` 传给 `--if-version`；返回 `version_conflict` 时重新读取再决定。
 - 附件只记录路径，不复制文件，所以要传最终位置的绝对路径，不要传临时文件。
-- 删除前先 `dt rec get ... --include <子表>` 看清会级联删掉什么；用户没明确要求删除时先确认。
+- 删除前先 `dt rec impact` 看清会级联删掉什么、会改掉哪些记录的引用；用户没明确要求删除时先确认。
 - 子表记录必须有父记录：用 `--parent`，或者嵌套在父记录里插入。

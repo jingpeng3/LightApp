@@ -1,11 +1,11 @@
 import {
-  Code2, Inbox, Pause, Pencil, Play, Plus, RefreshCw, RotateCcw, Terminal, Trash2, Webhook, X, Zap,
+  ChevronDown, ChevronRight, Code2, Inbox, Pause, Pencil, Play, Plus, RefreshCw, RotateCcw, Terminal, Trash2, Webhook, X, Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Binding, BindingAction, Delivery, EventItem, EventOp, TableInfo } from "../api";
+import type { Binding, BindingAction, Delivery, DeliveryDetail, EventItem, EventOp, TableInfo } from "../api";
 import { api } from "../api";
 import { onChange } from "../live";
-import { actorColor, brief, clock, cx, fieldLabel, relTime, tableLabel, toast, toastError } from "../util";
+import { actorColor, ask, brief, clock, cx, fieldLabel, relTime, tableLabel, toast, toastError } from "../util";
 import { ActorChip, Btn, Empty, useApp } from "./ui";
 
 const OP_LABEL: Record<EventOp, string> = { insert: "新增", update: "变更", delete: "删除" };
@@ -21,6 +21,27 @@ const EXAMPLES: Record<BindingAction, string> = {
   command: '{\n  "cmd": "cat >> /tmp/dt-events.jsonl"\n}',
   write: '{\n  "table": "task_log",\n  "parent_id": "${event.record_id}",\n  "data": {\n    "content": "任务 ${record.title} 已更新"\n  }\n}',
   inbox: '{\n  "title": "${record.title} 有变化",\n  "body": "${fields.status.before} → ${fields.status.after}"\n}',
+};
+const PROMPT_EXAMPLES: Record<BindingAction, string[]> = {
+  webhook: [
+    "任务 ${record.title} 已完成，请同步到下游系统。",
+    "${record.title} 的状态变成 ${fields.status.after}，请按接口约定处理。",
+  ],
+  command: [
+    "请检查任务 ${record.title} 的产出，有问题就写入任务日志。",
+    "处理 ${record.title}：${fields.status.before} → ${fields.status.after}",
+  ],
+  write: [],
+  inbox: [
+    "任务 ${record.title} 已完成，请人工确认产出。",
+    "${record.title} 被 ${event.actor} 改成 ${fields.status.after}，请跟进。",
+  ],
+};
+const PROMPT_HINT: Record<BindingAction, string> = {
+  webhook: "随请求发给接收方，放在 payload 的 prompt 字段。",
+  command: "通过 DT_PROMPT 环境变量传给命令，stdin 仍然只有事件 JSONL。",
+  write: "write 动作没有消费方，提示词不会生效。",
+  inbox: "写进收件箱消息，页面展开后能看到，dt inbox list 也会返回。",
 };
 
 /** 右侧主视图：记录事件流和绑定管理。 */
@@ -75,8 +96,8 @@ export function EventsView() {
       .then(() => loadBindings(), toastError);
   };
 
-  const remove = (binding: Binding) => {
-    if (!confirm(`删除绑定 ${binding.name}？`)) return;
+  const remove = async (binding: Binding) => {
+    if (!(await ask(`删除绑定 ${binding.name}？`, { ok: "删除" }))) return;
     api.deleteBinding(binding.name).then(() => {
       toast("info", `已删除绑定 ${binding.name}`);
       if (openDeliveries === binding.name) setOpenDeliveries(null);
@@ -382,16 +403,7 @@ function BindingCard({ binding, tables, open, deliveries, onToggle, onEdit, onDe
             <>
               <div className="space-y-1">
                 {deliveries.map((delivery) => (
-                  <div key={delivery.id} className="flex min-w-0 items-baseline gap-2 text-[11.5px]">
-                    <span className={cx("shrink-0 font-mono", delivery.status === "sent" ? "text-ok" : delivery.status === "failed" ? "text-danger" : "text-warn")}>
-                      {delivery.status}
-                    </span>
-                    <span className="shrink-0 font-mono text-ink-3">#{delivery.change_seq}</span>
-                    <span className="shrink-0 text-ink-3">{delivery.event_count > 1 ? `${delivery.event_count} 条事件` : "1 条"}</span>
-                    <span className="shrink-0 text-ink-3">尝试 {delivery.attempts}</span>
-                    {delivery.last_error && <span className="min-w-0 flex-1 truncate text-danger" title={delivery.last_error}>{delivery.last_error}</span>}
-                    <span className="ml-auto shrink-0 font-mono text-[10.5px] text-ink-3">{relTime(delivery.updated_at)}</span>
-                  </div>
+                  <DeliveryRow key={`${delivery.id}:${delivery.updated_at}`} name={binding.name} delivery={delivery} binding={binding} />
                 ))}
               </div>
               {failed && (
@@ -405,6 +417,143 @@ function BindingCard({ binding, tables, open, deliveries, onToggle, onEdit, onDe
       )}
     </article>
   );
+}
+
+function DeliveryRow({ name, delivery, binding }: { name: string; delivery: Delivery; binding: Binding }) {
+  const { byName } = useApp();
+  const [open, setOpen] = useState(false);
+  const [detail, setDetail] = useState<DeliveryDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const toggle = () => {
+    if (open) return setOpen(false);
+    setOpen(true);
+    if (detail || loading) return;
+    setLoading(true);
+    api.delivery(name, delivery.id).then(setDetail, toastError).finally(() => setLoading(false));
+  };
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={toggle}
+        className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-left text-[11.5px] hover:bg-raise"
+      >
+        <span className={cx("shrink-0 font-mono", delivery.status === "sent" ? "text-ok" : delivery.status === "failed" ? "text-danger" : "text-warn")}>
+          {delivery.status}
+        </span>
+        <span className="shrink-0 font-mono text-ink-3">
+          {delivery.event_count > 1 ? `#${delivery.change_seq}–#${delivery.last_seq ?? "?"}` : `#${delivery.change_seq}`}
+        </span>
+        <span className="shrink-0 text-ink-3">{delivery.event_count > 1 ? `${delivery.event_count} 条事件` : "1 条"}</span>
+        <span className="shrink-0 text-ink-3">尝试 {delivery.attempts}</span>
+        {delivery.last_result && <span className="min-w-0 flex-1 truncate text-ok" title={delivery.last_result}>{delivery.last_result}</span>}
+        {delivery.last_error && <span className="min-w-0 flex-1 truncate text-danger" title={delivery.last_error}>{delivery.last_error}</span>}
+        <span className="ml-auto shrink-0 font-mono text-[10.5px] text-ink-3" title={delivery.updated_at}>{relTime(delivery.updated_at)}</span>
+        {open ? <ChevronDown size={12} className="shrink-0 text-ink-3" /> : <ChevronRight size={12} className="shrink-0 text-ink-3" />}
+      </button>
+      {open && (
+        <div className="mt-1.5 rounded-md border border-line bg-surface p-2.5">
+          {loading || !detail ? (
+            <div className="text-[11.5px] text-ink-3">读取中…</div>
+          ) : (
+            <DeliveryDetailView detail={detail} binding={binding} byName={byName} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DeliveryDetailView({ detail, binding, byName }: {
+  detail: DeliveryDetail;
+  binding: Binding;
+  byName: Record<string, TableInfo>;
+}) {
+  const target = binding.action === "webhook"
+    ? String(binding.config.url ?? "")
+    : binding.action === "command"
+      ? [String(binding.config.cmd ?? ""), binding.config.cwd ? `cwd ${binding.config.cwd}` : ""].filter(Boolean).join(" · ")
+      : binding.action === "write"
+        ? `${String(binding.config.table ?? "")} · ${String(binding.config.mode ?? "insert")}`
+        : "当前域的收件箱";
+  return (
+    <>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+        <Info label="投递" value={`#${detail.id}`} />
+        <Info label="动作" value={ACTION_LABEL[binding.action]} />
+        <Info label="状态" value={detail.status} />
+        <Info label="尝试" value={`${detail.attempts} 次`} />
+        <Info label="入队" value={fullTime(detail.created_at)} />
+        <Info label="最后尝试" value={fullTime(detail.updated_at)} />
+        {detail.next_attempt_at && <Info label="下次重试" value={fullTime(detail.next_attempt_at)} />}
+        {detail.last_result && <Info label="结果" value={detail.last_result} />}
+        {detail.last_error && <Info label="错误" value={detail.last_error} wide />}
+      </div>
+      <div className="mt-2 border-t border-line/60 pt-2">
+        <div className="font-mono text-[10.5px] text-ink-3">调用</div>
+        <div className="mt-1 break-all font-mono text-[11px] text-ink-2">{target}</div>
+        {binding.prompt && (
+          <div className="mt-1 whitespace-pre-wrap text-[11.5px] text-ink-2">
+            <span className="mr-1 font-mono text-[10.5px] text-ink-3">提示词</span>{binding.prompt}
+          </div>
+        )}
+      </div>
+      <div className="mt-2 border-t border-line/60 pt-2">
+        <div className="font-mono text-[10.5px] text-ink-3">事件 {detail.events.length}/{detail.event_count}</div>
+        {!detail.events.length && <div className="mt-1 text-[11.5px] text-ink-3">事件已被清理</div>}
+        {detail.events.slice(0, 50).map((event) => (
+          <DeliveryEvent key={event.seq} event={event} table={byName[event.table]} />
+        ))}
+        {detail.events.length > 50 && (
+          <div className="mt-1 text-[11px] text-ink-3">只显示前 50 条，共 {detail.events.length} 条</div>
+        )}
+      </div>
+    </>
+  );
+}
+
+function DeliveryEvent({ event, table }: { event: EventItem; table: TableInfo | undefined }) {
+  const entries = Object.entries(event.fields);
+  return (
+    <div className="mt-1.5 border-t border-line/50 pt-1.5 first:border-0 first:pt-0">
+      <div className="flex flex-wrap items-baseline gap-x-2 font-mono text-[10.5px] text-ink-3">
+        <span>#{event.seq}</span>
+        <span>{OP_LABEL[event.op]}</span>
+        <span>{tableLabel(table, event.table)}{event.record_id != null ? ` #${event.record_id}` : ""}</span>
+        <ActorChip actor={event.actor} small />
+        <span className="ml-auto" title={event.ts}>{fullTime(event.ts)}</span>
+      </div>
+      <div className="mt-1 space-y-0.5">
+        {entries.map(([key, diff]) => {
+          const field = table?.fields.find((f) => f.key === key);
+          return (
+            <div key={key} className="flex min-w-0 items-baseline gap-1.5 text-[11.5px]">
+              <span className="w-[100px] shrink-0 truncate text-ink-3" title={key}>{field ? fieldLabel(field) : key}</span>
+              <span className="max-w-[40%] shrink truncate text-ink-3 line-through decoration-ink-3/40">{brief(field, diff.before)}</span>
+              <span className="shrink-0 text-ink-3">→</span>
+              <span className="min-w-0 truncate font-medium">{brief(field, diff.after)}</span>
+            </div>
+          );
+        })}
+        {!entries.length && <span className="text-[11.5px] text-ink-3">没有用户字段变化</span>}
+      </div>
+    </div>
+  );
+}
+
+function Info({ label, value, wide }: { label: string; value: React.ReactNode; wide?: boolean }) {
+  return (
+    <div className={cx("flex min-w-0 items-baseline gap-1.5", wide && "col-span-2")}>
+      <span className="w-[52px] shrink-0 text-[11px] text-ink-3">{label}</span>
+      <span className="min-w-0 break-all font-mono text-[11px] text-ink-2">{value}</span>
+    </div>
+  );
+}
+
+function fullTime(iso: string) {
+  return new Date(iso).toLocaleString("zh-CN", { hour12: false });
 }
 
 function ActorChipShort(actor: string | null) {
@@ -424,6 +573,7 @@ function BindingForm({ binding, onClose, onSaved }: { binding?: Binding; onClose
   const [field, setField] = useState(binding?.field ?? "");
   const [where, setWhere] = useState(binding?.where ? JSON.stringify(binding.where, null, 2) : "");
   const [whereBefore, setWhereBefore] = useState(binding?.where_before ? JSON.stringify(binding.where_before, null, 2) : "");
+  const [prompt, setPrompt] = useState(binding?.prompt ?? "");
   const [action, setAction] = useState<BindingAction>(binding?.action ?? "webhook");
   const [config, setConfig] = useState(binding ? JSON.stringify(binding.config, null, 2) : EXAMPLES.webhook);
   const [enabled, setEnabled] = useState(binding?.enabled ?? true);
@@ -439,6 +589,11 @@ function BindingForm({ binding, onClose, onSaved }: { binding?: Binding; onClose
   const changeAction = (next: BindingAction) => {
     if (!binding || binding.action !== next) setConfig(EXAMPLES[next]);
     setAction(next);
+  };
+
+  const fillPrompt = async (example: string) => {
+    if (prompt.trim() && !(await ask("用示例替换当前提示词？", { ok: "替换" }))) return;
+    setPrompt(example);
   };
 
   const submit = async () => {
@@ -465,6 +620,7 @@ function BindingForm({ binding, onClose, onSaved }: { binding?: Binding; onClose
       field: field || null,
       where: parsedWhere,
       where_before: parsedBefore,
+      prompt: prompt.trim() || null,
       action,
       config: parsedConfig,
       enabled,
@@ -572,6 +728,38 @@ function BindingForm({ binding, onClose, onSaved }: { binding?: Binding; onClose
               字符串里可用 <code className="font-mono">{"${event.record_id}"}</code>、<code className="font-mono">{"${record.title}"}</code>、<code className="font-mono">{"${fields.status.after}"}</code>。
               可选 <code className="font-mono">batch</code>（默认 20，一次动作合并几条投递）和 <code className="font-mono">max_pending</code>（默认 50000）。
             </p>
+          </Row>
+
+          <Row label="提示词（可选）">
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={3}
+              spellCheck={false}
+              placeholder={PROMPT_EXAMPLES[action][0] ?? "给消费方的一段说明，留空则不发送"}
+              className={cx(area, "resize-y text-[12.5px]")}
+            />
+            <p className="mt-1 text-[11px] leading-relaxed text-ink-3">
+              提示词会随这条绑定一起发给消费方，告诉对方「收到事件后要做什么」；不填就只发事件数据。
+              {PROMPT_HINT[action]} 支持 <code className="font-mono">{"${record.title}"}</code>、<code className="font-mono">{"${fields.status.after}"}</code>、
+              <code className="font-mono">{"${event.actor}"}</code> 等模板。
+            </p>
+            {PROMPT_EXAMPLES[action].length > 0 && (
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] text-ink-3">示例（点击填入）：</span>
+                {PROMPT_EXAMPLES[action].map((example) => (
+                  <button
+                    key={example}
+                    type="button"
+                    onClick={() => fillPrompt(example)}
+                    title={example}
+                    className="max-w-full truncate rounded-[4px] border border-line-strong px-1.5 py-0.5 font-mono text-[10.5px] text-ink-2 hover:border-accent hover:text-accent"
+                  >
+                    {example}
+                  </button>
+                ))}
+              </div>
+            )}
           </Row>
 
           <div className="grid grid-cols-2 gap-3">

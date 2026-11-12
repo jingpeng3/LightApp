@@ -6,6 +6,7 @@ import { useChanges } from "../live";
 import { fieldLabel, recTitle, relTime, tableLabel, toastError } from "../util";
 import { CellView } from "./cells";
 import { ChildTabs } from "./children";
+import { LinkText } from "./linkText";
 import { ActorChip, Btn, Empty, useApp, type Target } from "./ui";
 
 /** 单条记录的全屏视图：顶部只保留记录信息，剩下的空间整块看子表。 */
@@ -93,7 +94,7 @@ export function FullScreenRecord({ target, onClose }: { target: Target; onClose:
                   <div className="truncate font-mono text-[10.5px] tracking-wide text-ink-3 uppercase" title={f.key}>{fieldLabel(f)}</div>
                   <div className="mt-0.5 flex min-w-0 text-[13px]">
                     {f.type === "long_text" ? (
-                      <span className="line-clamp-2 whitespace-pre-wrap text-ink-2">{String(rec[f.key])}</span>
+                      <span className="line-clamp-2 whitespace-pre-wrap text-ink-2"><LinkText text={String(rec[f.key])} /></span>
                     ) : (
                       <CellView field={f} value={rec[f.key]} rec={rec} states={statuses[rec._id]?.[f.key]} />
                     )}

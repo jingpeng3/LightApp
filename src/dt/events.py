@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import subprocess
@@ -23,6 +24,8 @@ from dt import records
 from dt.db import Tx, dumps, now
 from dt.errors import DtError, not_found
 from dt.model import bind_domain, get_domain, get_table
+
+log = logging.getLogger("dt.events")
 
 RECORD_OPS = ("insert", "update", "delete")
 ACTIONS = ("webhook", "command", "write", "inbox")
@@ -377,6 +380,12 @@ def _validate_binding(conn, domain: str, raw: dict) -> dict:
         raise _bad(f"未知的动作 {action!r}", "可用动作：" + "、".join(ACTIONS))
     config = _validate_config(conn, did, domain, action, raw.get("config"))
 
+    prompt = raw.get("prompt")
+    if prompt is not None:
+        if not isinstance(prompt, str):
+            raise _bad("prompt 必须是字符串", "可以写一段给消费方的提示词，支持 ${record.title} 等模板")
+        prompt = prompt.strip() or None
+
     return {
         "name": name,
         "ops": ops,
@@ -384,6 +393,7 @@ def _validate_binding(conn, domain: str, raw: dict) -> dict:
         "field": field,
         "where": where,
         "where_before": where_before,
+        "prompt": prompt,
         "action": action,
         "config": config,
         "enabled": bool(raw.get("enabled", True)),
@@ -397,13 +407,13 @@ def create_binding(db, domain: str, raw: dict, *, actor: str) -> dict:
         if tx.conn.execute("SELECT 1 FROM dt_bindings WHERE domain = ? AND name = ?", (domain, b["name"])).fetchone():
             raise DtError("already_exists", f"绑定 {b['name']} 已存在", "换一个名字，或用 dt event unbind 删除后重绑", status=409)
         tx.execute(
-            "INSERT INTO dt_bindings (domain, name, ops, table_name, field, where_expr, where_before, action, config,"
-            " enabled, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO dt_bindings (domain, name, ops, table_name, field, where_expr, where_before, prompt, action, config,"
+            " enabled, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 domain, b["name"], dumps(b["ops"]), b["table"], b["field"],
                 None if b["where"] is None else dumps(b["where"]),
                 None if b["where_before"] is None else dumps(b["where_before"]),
-                b["action"], dumps(b["config"]), int(b["enabled"]), actor, tx.ts, tx.ts,
+                b["prompt"], b["action"], dumps(b["config"]), int(b["enabled"]), actor, tx.ts, tx.ts,
             ),
         )
         return get_binding(tx.conn, domain, b["name"])
@@ -418,6 +428,7 @@ def update_binding(db, domain: str, name: str, raw: dict, *, actor: str) -> dict
             "field": current["field"],
             "where": current["where"],
             "where_before": current["where_before"],
+            "prompt": current["prompt"],
             "action": current["action"],
             "config": current["config"],
             "enabled": current["enabled"],
@@ -427,12 +438,12 @@ def update_binding(db, domain: str, name: str, raw: dict, *, actor: str) -> dict
         b = _validate_binding(tx.conn, domain, merged)
         tx.execute(
             "UPDATE dt_bindings SET ops = ?, table_name = ?, field = ?, where_expr = ?, where_before = ?,"
-            " action = ?, config = ?, enabled = ?, updated_at = ? WHERE domain = ? AND name = ?",
+            " prompt = ?, action = ?, config = ?, enabled = ?, updated_at = ? WHERE domain = ? AND name = ?",
             (
                 dumps(b["ops"]), b["table"], b["field"],
                 None if b["where"] is None else dumps(b["where"]),
                 None if b["where_before"] is None else dumps(b["where_before"]),
-                b["action"], dumps(b["config"]), int(b["enabled"]), tx.ts, domain, name,
+                b["prompt"], b["action"], dumps(b["config"]), int(b["enabled"]), tx.ts, domain, name,
             ),
         )
         return get_binding(tx.conn, domain, name)
@@ -515,12 +526,28 @@ def list_deliveries(conn, domain: str, name: str, status: str | None = None, lim
     return out
 
 
+def get_delivery(conn, domain: str, name: str, delivery_id: int) -> dict:
+    """一条投递的详情：状态、时间、结果，以及这次投递携带的完整事件。"""
+    binding = get_binding(conn, domain, name)
+    row = conn.execute(
+        "SELECT * FROM dt_deliveries WHERE id = ? AND binding_id = ?", (delivery_id, binding["id"])
+    ).fetchone()
+    if row is None:
+        raise not_found(f"投递 {delivery_id}", "用 dt event deliveries 查看该绑定的投递")
+    item = dict(row)
+    item["seqs"] = json.loads(item["seqs"]) if item.get("seqs") else None
+    seqs = item["seqs"] or [item["change_seq"]]
+    changes = _changes_for_seqs(conn, seqs)
+    item["events"] = [event_from_change(changes[seq]) for seq in seqs if seq in changes]
+    return item
+
+
 def retry_binding(db, domain: str, name: str, *, actor: str = "system") -> dict:
     with db.tx(actor) as tx:
         binding = get_binding(tx.conn, domain, name)
         cur = tx.execute(
             "UPDATE dt_deliveries SET status = 'pending', attempts = 0, next_attempt_at = NULL,"
-            " last_error = NULL, updated_at = ? WHERE binding_id = ? AND status = 'failed'",
+            " last_error = NULL, last_result = NULL, updated_at = ? WHERE binding_id = ? AND status = 'failed'",
             (tx.ts, binding["id"]),
         )
         return {"retried": cur.rowcount}
@@ -528,7 +555,7 @@ def retry_binding(db, domain: str, name: str, *, actor: str = "system") -> dict:
 
 DUE_SQL = """
 SELECT d.id, d.binding_id, d.change_seq, d.last_seq, d.seqs, d.event_count, d.attempts,
-       b.name AS binding_name, b.domain, b.action, b.config
+       b.name AS binding_name, b.domain, b.action, b.config, b.prompt
 FROM dt_deliveries d JOIN dt_bindings b ON b.id = d.binding_id
 WHERE d.status = 'pending' AND b.enabled = 1
   AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= ?)
@@ -568,6 +595,9 @@ def _send_webhook(deliveries: list[dict], events: list[dict]):
         "event_count": len(events),
         "events": events,
     }
+    prompt = _render(first.get("prompt"), events[0])
+    if prompt:
+        payload["prompt"] = str(prompt)
     # 单事件保留旧的 event / delivery_id 字段，方便只处理一条事件的接收方
     if len(events) == 1:
         payload["delivery_id"] = first["id"]
@@ -587,11 +617,13 @@ def _send_webhook(deliveries: list[dict], events: list[dict]):
         ).hexdigest()
     resp = httpx.post(config["url"], content=body, headers=headers, timeout=config.get("timeout", 10))
     resp.raise_for_status()
+    return f"HTTP {resp.status_code}"
 
 
 def _run_command(deliveries: list[dict], events: list[dict]):
     first = deliveries[0]
     config = json.loads(first["config"])
+    prompt = _render(first.get("prompt"), events[0])
     env = os.environ.copy()
     env.update({
         "DT_BINDING": first["binding_name"],
@@ -601,6 +633,7 @@ def _run_command(deliveries: list[dict], events: list[dict]):
         "DT_RECORD_ID": "" if events[0]["record_id"] is None else str(events[0]["record_id"]),
         "DT_EVENT_SEQ": str(events[0]["seq"]),
         "DT_EVENT_COUNT": str(len(events)),
+        "DT_PROMPT": "" if prompt is None else str(prompt),
     })
     timeout = config.get("timeout", 30)
     stdin = "".join(dumps(event) + "\n" for event in events)
@@ -614,6 +647,7 @@ def _run_command(deliveries: list[dict], events: list[dict]):
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()[-500:]
         raise RuntimeError(f"命令退出码 {proc.returncode}：{detail}")
+    return f"退出码 {proc.returncode}"
 
 
 def _run_write(db, deliveries: list[dict], events: list[dict]):
@@ -632,6 +666,7 @@ def _run_write(db, deliveries: list[dict], events: list[dict]):
                 if config.get("parent_id") is not None:
                     parent_id = _as_id(_render(config["parent_id"], event), "parent_id")
                 records.insert(tx, table, data, parent_id)
+    return f"写入 {len(events)} 条"
 
 
 OP_LABEL = {"insert": "新增", "update": "变更", "delete": "删除"}
@@ -668,6 +703,7 @@ def _default_body(event: dict, table) -> str:
 def _run_inbox(db, deliveries: list[dict], events: list[dict]):
     first = deliveries[0]
     config = json.loads(first["config"])
+    written = 0
     with db.tx(f"binding:{first['binding_name']}", suppress_bindings=True) as tx:
         bind_domain(tx, first["domain"])
         tables = {}
@@ -682,18 +718,22 @@ def _run_inbox(db, deliveries: list[dict], events: list[dict]):
             body = _render(config["body"], event) if config.get("body") else None
             title = _default_title(event, table) if title is None or title == "" else str(title)
             body = _default_body(event, table) if body is None or body == "" else str(body)
-            tx.execute(
+            prompt = _render(first.get("prompt"), event)
+            prompt = None if prompt is None or prompt == "" else str(prompt)
+            cur = tx.execute(
                 "INSERT OR IGNORE INTO dt_inbox (domain, binding_id, binding_name, event_seq, table_name, record_id,"
-                " op, title, body, events, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unread', ?)",
+                " op, title, body, prompt, events, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unread', ?)",
                 (
                     first["domain"], first["binding_id"], first["binding_name"], event["seq"], event["table"],
-                    event["record_id"], event["op"], title, body, dumps([event]), tx.ts,
+                    event["record_id"], event["op"], title, body, prompt, dumps([event]), tx.ts,
                 ),
             )
+            written += cur.rowcount
+    return f"写入 {written} 条"
 
 
-def _mark_many(db, deliveries: list[dict], error: str | None):
-    """一次事务更新一批投递的状态。"""
+def _mark_many(db, deliveries: list[dict], error: str | None, result: str | None = None):
+    """一次事务更新一批投递的状态，成功时把动作结果记进 last_result。"""
     if not deliveries:
         return
     with db.tx("system") as tx:
@@ -711,9 +751,14 @@ def _mark_many(db, deliveries: list[dict], error: str | None):
                 last_error = error[:1000]
             tx.execute(
                 "UPDATE dt_deliveries SET status = ?, attempts = ?, next_attempt_at = ?, last_error = ?,"
-                " updated_at = ? WHERE id = ?",
-                (status, attempts, next_at, last_error, tx.ts, delivery["id"]),
+                " last_result = ?, updated_at = ? WHERE id = ?",
+                (status, attempts, next_at, last_error, result if error is None else None, tx.ts, delivery["id"]),
             )
+
+
+def _delivery_ids(deliveries: list[dict]) -> str:
+    ids = [delivery["id"] for delivery in deliveries]
+    return f"#{ids[0]}" if len(ids) == 1 else f"#{ids[0]} 等 {len(ids)} 条"
 
 
 def dispatch_once(db, limit: int = 50) -> int:
@@ -754,24 +799,38 @@ def dispatch_once(db, limit: int = 50) -> int:
 
     processed = 0
     for deliveries, events, missing in jobs:
-        _mark_many(db, missing, "对应的事件已经被清理")
+        if missing:
+            _mark_many(db, missing, "对应的事件已经被清理")
+            log.warning("投递 %s 对应的事件已被清理，跳过", _delivery_ids(missing))
         processed += len(missing)
         if not deliveries:
             continue
+        first = deliveries[0]
+        started = time.monotonic()
         try:
-            action = deliveries[0]["action"]
+            action = first["action"]
             if action == "webhook":
-                _send_webhook(deliveries, events)
+                result = _send_webhook(deliveries, events)
             elif action == "command":
-                _run_command(deliveries, events)
+                result = _run_command(deliveries, events)
             elif action == "inbox":
-                _run_inbox(db, deliveries, events)
+                result = _run_inbox(db, deliveries, events)
             else:
-                _run_write(db, deliveries, events)
-        except Exception as e:  # 单个投递失败不能中断调度
-            _mark_many(db, deliveries, f"{type(e).__name__}: {e}")
+                result = _run_write(db, deliveries, events)
+        except Exception as e:  # 单个投递失败不能中断调度，失败的投递会退避重试
+            detail = f"{type(e).__name__}: {e}"
+            _mark_many(db, deliveries, detail)
+            log.warning(
+                "投递 %s 绑定 %s（%s）失败，第 %d 次：%s",
+                _delivery_ids(deliveries), first["binding_name"], first["action"], first["attempts"] + 1, detail,
+            )
         else:
-            _mark_many(db, deliveries, None)
+            _mark_many(db, deliveries, None, result)
+            log.info(
+                "投递 %s 绑定 %s（%s）%d 条事件 → %s，%dms",
+                _delivery_ids(deliveries), first["binding_name"], first["action"], len(events),
+                result or "成功", int((time.monotonic() - started) * 1000),
+            )
         processed += len(deliveries)
     return processed
 

@@ -109,13 +109,14 @@ delete 的 `record` 是删除前的快照。
   "binding": "notify-done",
   "delivery_ids": [12, 13],
   "event_count": 2,
+  "prompt": "任务 写设计 完成了，请检查产出并更新下游。",
   "events": [ ...事件... ]
 }
 ```
 
-只有一条时额外有 `delivery_id` 和 `event`。
+只有一条时额外有 `delivery_id` 和 `event`。绑定配置了提示词时才有 `prompt`，它是给消费方的指令（支持模板，按第一条事件渲染）。
 
-- command 的 stdin 是 JSONL，每行一个事件；`DT_EVENT_COUNT` 是条数。
+- command 的 stdin 是 JSONL，每行一个事件；`DT_EVENT_COUNT` 是条数，`DT_PROMPT` 是绑定的提示词（没配置时为空字符串）。
 - write 在一个事务里按事件顺序逐条执行。
 
 投递是 at-least-once，重试可能重复。消费方按 `delivery_ids` / `seq` 去重；`dt event deliveries -D <域> <绑定名>` 查看状态，`dt event retry` 重排 failed。

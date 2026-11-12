@@ -11,3 +11,5 @@ src/dt/static/
 .vscode/
 *.egg-info/
 build/
+.claude/skills/
+.claude/settings.local.json

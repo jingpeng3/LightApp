@@ -9,6 +9,14 @@
 
 `batch` / `max_pending` 可以写在任何动作的 config 里。
 
+绑定的顶层 `prompt`（CLI 的 `--prompt`）是可选的一段提示词，随动作一起给消费方，让接收方知道要做什么，而不只是收到数据变化。支持和 `title` / `body` 一样的模板：
+
+- `webhook`：放在请求 body 的 `prompt` 字段。
+- `command`：通过 `DT_PROMPT` 环境变量传入。
+- `inbox`：存到收件箱消息的 `prompt`，页面和 `dt inbox list` 都能看到。
+- `write` 没有消费方，忽略 `prompt`。
+- webhook / command 一次可能带多条事件，`prompt` 用第一条事件渲染；inbox 每条消息各自用对应事件渲染。留空不发送。
+
 ## webhook
 
 ```json
@@ -32,12 +40,15 @@
   "binding": "notify-done",
   "delivery_ids": [12, 13],
   "event_count": 2,
+  "prompt": "任务 写设计 完成了，请检查产出并更新下游。",
   "events": [
     {"seq": 1042, "op": "update", "...": "..."},
     {"seq": 1043, "op": "update", "...": "..."}
   ]
 }
 ```
+
+配置了 `prompt` 时才有 `prompt` 字段；有模板时用第一条事件渲染。
 
 只有一条事件时，额外带旧字段：
 
@@ -80,6 +91,7 @@
   - `DT_EVENT_SEQ`（第一条）
   - `DT_EVENT_COUNT`
   - `DT_OP` / `DT_TABLE` / `DT_RECORD_ID`（第一条）
+  - `DT_PROMPT`：绑定的提示词按第一条事件渲染；没配置时为空字符串
 
 示例：把事件逐条写入文件。
 
@@ -158,15 +170,15 @@ dt event bind -D proj_a -A claude log-events \
   - body：逐字段的 `label：before → after`
 - 每个事件一条消息；同一投递里有多条事件就写多条消息。
 - 消息按 `(binding_id, event_seq)` 去重，投递重试不会重复。
-- 消息字段：`title`、`body`、`events`（完整事件数组）、`status`（unread/read）、`binding_name`、`table_name`、`record_id`、`op`。
+- 消息字段：`title`、`body`、`prompt`、`events`（完整事件数组）、`status`（unread/read）、`binding_name`、`table_name`、`record_id`、`op`。
 - 读取：
 
 ```bash
 dt inbox list -D proj_a --status unread --limit 50
-dt inbox read -D proj_a 12
-dt inbox unread -D proj_a 12
-dt inbox read-all -D proj_a
-dt inbox delete -D proj_a 12
+dt inbox read -D proj_a -A claude 12
+dt inbox unread -D proj_a -A claude 12
+dt inbox read-all -D proj_a -A claude
+dt inbox delete -D proj_a -A claude 12
 ```
 
 - 收件箱消息不会自动清理；`sent` / `failed` 投递的保留策略不影响消息。
@@ -179,5 +191,7 @@ dt inbox delete -D proj_a 12
 - webhook 用 `events` 数组，command 用 JSONL，write 在一个事务里循环。
 - 同一绑定按事件 seq 顺序执行；一个慢动作会阻塞该绑定后面的投递。
 - 失败退避：1s、5s、30s、2m、10m、30m、1h；超过后停在 `failed`，用 `dt event retry` 重排。
+- 每次投递的结果记在 `last_result`（webhook 的 `HTTP 200`、command 的 `退出码 0`、write / inbox 的写入条数），错误在 `last_error`；`dt event deliveries` 能看到。
+- `dt serve` 每次投递打一行日志（绑定、动作、事件条数、结果、耗时），失败打 WARNING，带尝试次数和错误。
 - at-least-once：重试可能重复，接收方按 delivery id / seq 去重。
 - `sent` 保留 7 天、`failed` 保留 30 天；pending 不清理。

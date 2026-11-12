@@ -1,12 +1,63 @@
 import { CheckCheck, ChevronDown, ChevronRight, Code2, Inbox, MailOpen, RefreshCw, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import type { InboxMessage, InboxPage, TableInfo } from "../api";
 import { api } from "../api";
 import { onChange } from "../live";
-import { brief, clock, cx, fieldLabel, relTime, tableLabel, toast, toastError } from "../util";
+import { ask, brief, clock, cx, fieldLabel, relTime, tableLabel, toast, toastError } from "../util";
 import { ActorChip, Btn, Empty, useApp } from "./ui";
 
 const OP_LABEL = { insert: "新增", update: "变更", delete: "删除" } as const;
+
+// 收件箱消息由服务端调度器在记录变更之后异步写入，WebSocket 不推送它们：
+// 收到变更后等调度器处理完再拉；读状态可能被 CLI 改掉，另加慢速兜底轮询
+const SETTLE_MS = 1500;
+const FALLBACK_MS = 30000;
+
+let unread = 0;
+const unreadListeners = new Set<() => void>();
+const setUnread = (n: number) => {
+  unread = n;
+  unreadListeners.forEach((fn) => fn());
+};
+
+/** 在变更推送后、窗口重新获得焦点时以及兜底定时器到点时调用 load。 */
+function useInboxRefresh(load: () => void) {
+  useEffect(() => {
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    const off = onChange((c) => {
+      if (c.op !== "insert" && c.op !== "update" && c.op !== "delete") return;
+      clearTimeout(settle);
+      settle = setTimeout(load, SETTLE_MS);
+    });
+    const timer = setInterval(load, FALLBACK_MS);
+    window.addEventListener("focus", load);
+    return () => {
+      off();
+      clearTimeout(settle);
+      clearInterval(timer);
+      window.removeEventListener("focus", load);
+    };
+  }, [load]);
+}
+
+/** 当前域的未读消息数，侧栏和收件箱页共用。 */
+export function useUnread(domain: string) {
+  const load = useCallback(() => {
+    api.inbox({ status: "unread", limit: 1 }).then((data) => setUnread(data.unread), () => {});
+  }, []);
+  useEffect(() => {
+    setUnread(0);
+    load();
+  }, [domain, load]);
+  useInboxRefresh(load);
+  return useSyncExternalStore(
+    (fn) => {
+      unreadListeners.add(fn);
+      return () => void unreadListeners.delete(fn);
+    },
+    () => unread,
+  );
+}
 
 /** 收件箱：被 inbox 绑定收集的记录事件。 */
 export function InboxView() {
@@ -18,20 +69,17 @@ export function InboxView() {
 
   const load = useCallback((quiet = false) => {
     api.inbox({ status: filter === "unread" ? "unread" : undefined, limit: 100 }).then(
-      setData,
+      (page) => (setData(page), setUnread(page.unread)),
       quiet ? () => {} : toastError,
     );
   }, [filter]);
+  const quietLoad = useCallback(() => load(true), [load]);
 
   useEffect(() => {
     setData(null);
     load();
   }, [load]);
-  useEffect(() => {
-    const timer = setInterval(() => load(true), 3000);
-    return () => clearInterval(timer);
-  }, [load]);
-  useEffect(() => onChange(() => load(true)), [load]);
+  useInboxRefresh(quietLoad);
 
   const mark = (message: InboxMessage, read: boolean) => {
     api.markInbox(message.id, read ? "read" : "unread").then(() => load(true), toastError);
@@ -44,8 +92,8 @@ export function InboxView() {
     }, toastError);
   };
 
-  const remove = (message: InboxMessage) => {
-    if (!confirm(`删除收件箱消息「${message.title}」？`)) return;
+  const remove = async (message: InboxMessage) => {
+    if (!(await ask(`删除收件箱消息「${message.title}」？`, { ok: "删除" }))) return;
     api.deleteInbox(message.id).then(() => {
       setExpanded((id) => (id === message.id ? null : id));
       load(true);
@@ -161,6 +209,12 @@ function MessageRow({ message, table, open, raw, onToggle, onRaw, onMark, onDele
           {message.body && !open && (
             <p className="mt-1 line-clamp-2 whitespace-pre-wrap text-[12.5px] text-ink-2">{message.body}</p>
           )}
+          {message.prompt && !open && (
+            <p className="mt-1 line-clamp-2 whitespace-pre-wrap text-[12.5px] text-ink-2">
+              <span className="mr-1 font-mono text-[10.5px] text-ink-3">提示词</span>
+              {message.prompt}
+            </p>
+          )}
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10.5px] text-ink-3">
             {message.op && <span>{OP_LABEL[message.op] ?? message.op}</span>}
             {message.table_name && <span>{tableLabel(table, message.table_name)}{message.record_id != null ? ` #${message.record_id}` : ""}</span>}
@@ -184,6 +238,12 @@ function MessageRow({ message, table, open, raw, onToggle, onRaw, onMark, onDele
 
       {open && (
         <div className="border-t border-line/70 px-5 py-3 pl-[39px]">
+          {message.prompt && (
+            <div className="mb-2 rounded-md border border-line bg-raise px-2.5 py-2">
+              <div className="font-mono text-[10.5px] text-ink-3">提示词</div>
+              <p className="mt-1 whitespace-pre-wrap text-[12.5px] leading-relaxed text-ink-2">{message.prompt}</p>
+            </div>
+          )}
           {message.body && <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-ink-2">{message.body}</p>}
           {events.map((event) => (
             <div key={event.seq} className="mt-2">

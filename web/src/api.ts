@@ -105,6 +105,7 @@ export interface Binding {
   field: string | null;
   where: Record<string, unknown> | null;
   where_before: Record<string, unknown> | null;
+  prompt: string | null;
   action: BindingAction;
   config: Record<string, unknown>;
   enabled: boolean;
@@ -124,8 +125,13 @@ export interface Delivery {
   attempts: number;
   next_attempt_at: string | null;
   last_error: string | null;
+  last_result: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface DeliveryDetail extends Delivery {
+  events: EventItem[];
 }
 
 export interface InboxMessage {
@@ -139,6 +145,7 @@ export interface InboxMessage {
   op: EventOp | null;
   title: string;
   body: string | null;
+  prompt: string | null;
   events: EventItem[];
   status: "unread" | "read";
   created_at: string;
@@ -186,6 +193,57 @@ export interface GraphData {
   edges: GraphEdge[];
   touches: { actor: string; record_id: number; count: number }[];
   table_edges: TableEdge[];
+  /** 每张表没有任何父子或 link 关系的记录数，统计整个域 */
+  orphans: Record<string, number>;
+  /** 带 at 请求时才有：回放时间轴的范围，at_ts 是 at 那条变更的时间 */
+  timeline?: { first_seq: number; last_seq: number; at_ts: string | null };
+}
+
+export interface HubItem extends RecBrief {
+  degree: number;
+  in: number;
+  out: number;
+}
+
+export type Direction = "both" | "out" | "in";
+
+/** 关联查询里的节点：depth 是离最近起点几跳，via 是第一次到达它走的那条边（dir=in 表示逆着边走）。 */
+export interface RelatedNode extends GraphNode {
+  depth: number;
+  via: (GraphEdge & { from: number; dir: "out" | "in" }) | null;
+}
+
+export interface RelatedData {
+  seq: number;
+  seeds: number[];
+  nodes: RelatedNode[];
+  edges: GraphEdge[];
+  touches: { actor: string; record_id: number; count: number }[];
+  truncated: boolean;
+}
+
+export interface PathData {
+  found: boolean;
+  nodes: GraphNode[];
+  edges: (GraphEdge & { dir: "out" | "in" })[];
+}
+
+export interface RecBrief {
+  table: string;
+  id: number;
+  title: string;
+}
+
+export interface LintData {
+  dangling: { total: number; items: (RecBrief & { field: string; target: number; target_table: string })[] };
+  orphans: { total: number; items: RecBrief[] };
+}
+
+export interface DeleteImpact {
+  record: RecBrief;
+  cascade: RecBrief[];
+  unlink: (RecBrief & { field: string; target: number })[];
+  blocked: (RecBrief & { child: string; count: number })[];
 }
 
 export interface QueryBody {
@@ -244,7 +302,8 @@ export const api = {
   update: (table: string, id: number, set: Record<string, unknown>, if_version?: number) =>
     req<Rec>("PATCH", `${t(table)}/records/${id}`, { set, if_version }),
   remove: (table: string, id: number) =>
-    req<{ deleted: { table: string; _id: number }[] }>("DELETE", `${t(table)}/records/${id}`),
+    req<{ deleted: { table: string; _id: number }[]; unlinked: { table: string; _id: number; field: string }[] }>("DELETE", `${t(table)}/records/${id}`),
+  impact: (table: string, id: number) => req<DeleteImpact>("GET", `${t(table)}/records/${id}/impact`),
   changes: (params: Record<string, string | number>) =>
     req<Change[]>("GET", `${d()}/changes?` + new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)]))),
   events: (params: Record<string, string | number | undefined>) =>
@@ -256,6 +315,8 @@ export const api = {
   deleteBinding: (name: string) => req<{ deleted: string }>("DELETE", `${d()}/bindings/${encodeURIComponent(name)}`),
   deliveries: (name: string, params: Record<string, string | number | undefined>) =>
     req<Delivery[]>("GET", `${d()}/bindings/${encodeURIComponent(name)}/deliveries?` + query(params)),
+  delivery: (name: string, id: number) =>
+    req<DeliveryDetail>("GET", `${d()}/bindings/${encodeURIComponent(name)}/deliveries/${id}`),
   retryBinding: (name: string) =>
     req<{ retried: number }>("POST", `${d()}/bindings/${encodeURIComponent(name)}/retry`),
   inbox: (params: Record<string, string | number | undefined>) =>
@@ -265,6 +326,10 @@ export const api = {
   readAllInbox: () => req<{ updated: number }>("POST", `${d()}/inbox/read-all`),
   deleteInbox: (id: number) => req<{ deleted: number }>("DELETE", `${d()}/inbox/${id}`),
   graph: (params: Record<string, string | number | undefined>) => req<GraphData>("GET", `${d()}/graph?` + query(params)),
+  related: (params: Record<string, string | number | undefined>) => req<RelatedData>("GET", `${d()}/graph/related?` + query(params)),
+  path: (params: Record<string, string | number | undefined>) => req<PathData>("GET", `${d()}/graph/path?` + query(params)),
+  lint: () => req<LintData>("GET", `${d()}/graph/lint`),
+  hubs: (params: Record<string, string | number | undefined>) => req<{ total: number; items: HubItem[] }>("GET", `${d()}/graph/hubs?` + query(params)),
   fileStatus: (record_ids: number[]) => req<FileStatuses>("POST", "/files/status", { record_ids }),
   tree: (id: number, field: string, idx: number) =>
     req<{ files: { path: string; size: number }[]; truncated: boolean }>("GET", `/files/${id}/${field}/${idx}/tree`),

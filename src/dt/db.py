@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS dt_bindings (
     field TEXT,
     where_expr TEXT,
     where_before TEXT,
+    prompt TEXT,
     action TEXT NOT NULL,
     config TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
@@ -114,6 +115,7 @@ CREATE TABLE IF NOT EXISTS dt_deliveries (
     attempts INTEGER NOT NULL DEFAULT 0,
     next_attempt_at TEXT,
     last_error TEXT,
+    last_result TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE (binding_id, change_seq)
@@ -129,6 +131,7 @@ CREATE TABLE IF NOT EXISTS dt_inbox (
     op TEXT,
     title TEXT NOT NULL,
     body TEXT,
+    prompt TEXT,
     events TEXT,
     status TEXT NOT NULL DEFAULT 'unread',
     created_at TEXT NOT NULL,
@@ -240,6 +243,14 @@ class Database:
             self.conn.execute("ALTER TABLE dt_deliveries ADD COLUMN seqs TEXT")
         if "event_count" not in cols:
             self.conn.execute("ALTER TABLE dt_deliveries ADD COLUMN event_count INTEGER NOT NULL DEFAULT 1")
+        if "last_result" not in cols:
+            self.conn.execute("ALTER TABLE dt_deliveries ADD COLUMN last_result TEXT")
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(dt_bindings)")}
+        if "prompt" not in cols:
+            self.conn.execute("ALTER TABLE dt_bindings ADD COLUMN prompt TEXT")
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(dt_inbox)")}
+        if "prompt" not in cols:
+            self.conn.execute("ALTER TABLE dt_inbox ADD COLUMN prompt TEXT")
 
         rows = self.conn.execute(
             "SELECT seq, before, after FROM dt_changes"

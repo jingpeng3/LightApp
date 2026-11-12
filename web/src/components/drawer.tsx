@@ -1,12 +1,13 @@
-import { History, Maximize2, Trash2, X } from "lucide-react";
+import { History, Maximize2, Network, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Change, Field, FileStatuses, Rec, TableInfo } from "../api";
+import type { Change, Field, FileStatuses, Rec, RelatedNode, TableInfo } from "../api";
 import { ACTOR, api, ApiError } from "../api";
 import { useChanges } from "../live";
-import { actorColor, brief, clock, cx, diffKeys, fieldLabel, recTitle, relTime, tableLabel, toast, toastError } from "../util";
+import { actorColor, asList, ask, brief, clock, cx, diffKeys, fieldLabel, recTitle, relTime, tableLabel, toast, toastError } from "../util";
 import { CellView } from "./cells";
 import { ChildTabs } from "./children";
 import { editMode, InlineInput, PopoverEditor } from "./editors";
+import { LinkText } from "./linkText";
 import { ActorChip, Btn, TypeGlyph, useApp, type Target } from "./ui";
 
 function Shell({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
@@ -83,10 +84,32 @@ export function RecordDrawer({ target, onClose }: { target: Target; onClose: () 
 
   const remove = async () => {
     if (!rec) return;
-    const counts = await Promise.all(table.children.map((c) => api.query(c, { parent_id: rec._id, limit: 1 }).then((r) => [c, r.total] as const)));
-    const cascade = counts.filter(([, n]) => n > 0).map(([c, n]) => `${tableLabel(byName[c], c)} ${n} 条`);
-    if (!confirm(`删除 ${tableLabel(table, table.name)} #${rec._id}「${recTitle(table, rec)}」？${cascade.length ? `\n\n会一起删除子记录：${cascade.join("、")}（以及它们的下级）` : ""}`)) return;
-    api.remove(table.name, rec._id).then((r) => (toast("info", `已删除 ${r.deleted.length} 条记录`), onClose()), toastError);
+    let imp;
+    try {
+      imp = await api.impact(table.name, rec._id);
+    } catch (e) {
+      return toastError(e);
+    }
+    const label = (name: string) => tableLabel(byName[name], name);
+    if (imp.blocked.length) {
+      const b = imp.blocked[0];
+      return toast("error", `删不掉：${label(b.table)} #${b.id} 还有 ${b.count} 条${label(b.child)}`, `${label(b.child)} 设置了禁止级联删除，先删除这些子记录`);
+    }
+    const count = (items: { table: string }[]) =>
+      Object.entries(items.reduce<Record<string, number>>((m, x) => ((m[x.table] = (m[x.table] ?? 0) + 1), m), {}))
+        .map(([t, n]) => `${label(t)} ${n} 条`).join("、");
+    const lines = [
+      imp.cascade.length && `会一起删除子记录：${count(imp.cascade)}`,
+      imp.unlink.length && `会从这些记录的关联字段里去掉它：${count(imp.unlink)}`,
+    ].filter(Boolean);
+    if (!(await ask(`删除 ${tableLabel(table, table.name)} #${rec._id}「${recTitle(table, rec)}」？`, {
+      body: lines.length ? lines.join("\n") : undefined,
+      ok: "删除",
+    }))) return;
+    api.remove(table.name, rec._id).then((r) => {
+      toast("info", `已删除 ${r.deleted.length} 条记录${r.unlinked.length ? `，${r.unlinked.length} 条记录去掉了对它的引用` : ""}`);
+      onClose();
+    }, toastError);
   };
 
   const parent = table.parent ? byName[table.parent] : undefined;
@@ -164,9 +187,12 @@ export function RecordDrawer({ target, onClose }: { target: Target; onClose: () 
                           <InlineInput field={f} value={rec[f.key]} onCommit={(v) => save(f, v)} onCancel={() => setEditing(null)} />
                         </div>
                       ) : f.type === "long_text" && rec[f.key] ? (
-                        <p className="whitespace-pre-wrap leading-relaxed">{String(rec[f.key])}</p>
+                        <p className="whitespace-pre-wrap leading-relaxed"><LinkText text={String(rec[f.key])} /></p>
                       ) : rec[f.key] == null && f.type !== "checkbox" ? (
-                        <span className="text-ink-3 opacity-0 group-hover:opacity-100">{mode === "none" ? "—" : "点击填写"}</span>
+                        <span className="text-ink-3">
+                          <span className={cx(mode !== "none" && "group-hover:hidden")}>—</span>
+                          {mode !== "none" && <span className="hidden group-hover:inline">点击填写</span>}
+                        </span>
                       ) : (
                         <span className="flex min-w-0 flex-wrap gap-1 [&>span]:flex-wrap">
                           <CellView field={f} value={rec[f.key]} rec={rec} states={statuses[rec._id]?.[f.key]} />
@@ -177,6 +203,7 @@ export function RecordDrawer({ target, onClose }: { target: Target; onClose: () 
                 );
               })}
             </div>
+            <RecordLinks table={table} id={rec._id} />
             {table.children.length > 0 && (
               <section className="border-t border-line bg-panel px-6 py-4">
                 <h3 className="mb-2 font-display text-[20px]">子表</h3>
@@ -193,6 +220,69 @@ export function RecordDrawer({ target, onClose }: { target: Target; onClose: () 
         ) : null;
       })()}
     </Shell>
+  );
+}
+
+/** 记录的 link 关联：它引用的、引用它的，每条可点开；子表和父记录在别处已经显示。 */
+function RecordLinks({ table, id }: { table: TableInfo; id: number }) {
+  const { domain, byName, openRecord } = useApp();
+  const [items, setItems] = useState<RelatedNode[] | null>(null);
+  const [more, setMore] = useState(false);
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    api.related({ ids: id, kinds: "link", limit: 201 }).then((r) => {
+      if (!alive) return;
+      setItems(r.nodes.filter((x) => x.depth === 1));
+      setMore(r.truncated);
+    }, () => {});
+    return () => void (alive = false);
+  }, [id, n]);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  useChanges((c) => {
+    if (!items || !["insert", "update", "delete"].includes(c.op)) return;
+    const rec = c.after ?? c.before;
+    const points = byName[c.table_name]?.fields.some((f) => f.type === "link" && asList<number>(rec?.[f.key]).includes(id));
+    if (c.record_id === id || items.some((x) => x.id === c.record_id) || points) {
+      clearTimeout(timer.current);
+      timer.current = setTimeout(() => setN((x) => x + 1), 400);
+    }
+  });
+  if (!items?.length) return null;
+  const out = items.filter((x) => x.via!.dir === "out");
+  const inn = items.filter((x) => x.via!.dir === "in");
+  const fieldName = (t: string, key: string) => {
+    const f = byName[t]?.fields.find((x) => x.key === key);
+    return f ? fieldLabel(f) : key;
+  };
+  const group = (title: string, xs: RelatedNode[], owner: (x: RelatedNode) => string) => xs.length > 0 && (
+    <div className="mb-2">
+      <div className="mb-1 text-[11.5px] text-ink-3">{title} · {xs.length}</div>
+      <div className="flex flex-wrap gap-1">
+        {xs.map((x) => (
+          <button key={x.id} type="button" onClick={() => openRecord({ table: x.table, id: x.id })}
+            title={`${tableLabel(byName[x.table], x.table)} #${x.id} · ${fieldName(owner(x), x.via!.field!)}`}
+            className="inline-flex h-[24px] max-w-[260px] items-center gap-1.5 rounded-[5px] border border-line-strong px-2 text-[12px] hover:border-accent hover:text-accent">
+            <span className="shrink-0 text-ink-3">{fieldName(owner(x), x.via!.field!)}</span>
+            <span className="truncate">{x.title}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+  return (
+    <section className="border-t border-line px-6 py-4">
+      <div className="mb-2 flex items-center">
+        <h3 className="font-display text-[20px]">关联</h3>
+        <a href={`#${encodeURIComponent(domain)}/@graph?view=records&focus=${id}`} className="ml-auto inline-flex items-center gap-1 text-[12px] text-ink-3 hover:text-accent">
+          <Network size={13} /> 在图谱里查看
+        </a>
+      </div>
+      {group("它引用的", out, () => table.name)}
+      {group("引用它的", inn, (x) => x.table)}
+      {more && <div className="text-[11.5px] text-ink-3">只显示了前 200 条，完整关联在图谱里看</div>}
+    </section>
   );
 }
 

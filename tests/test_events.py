@@ -131,12 +131,27 @@ def test_command_action_gets_event_on_stdin(task_api, tmp_path):
     assert events.dispatch_once(task_api.db) == 1
     event = json.loads(out.read_text())
     assert event["op"] == "insert" and event["record_id"] == rec["_id"] and event["record"]["title"] == "a"
+    assert task_api("GET", "/bindings/cmd/deliveries")[0]["last_result"] == "退出码 0"
+
+
+def test_binding_prompt_reaches_command(task_api, tmp_path):
+    out = tmp_path / "prompt.txt"
+    task_api("POST", "/bindings", {
+        "name": "cmd", "ops": ["insert"], "table": "task",
+        "action": "command", "config": {"cmd": f'printf "%s" "$DT_PROMPT" > {out}'},
+        "prompt": "任务 ${record.title} 已完成，操作者 ${event.actor}",
+    })
+    task_api("POST", "/tables/task/records", {"data": {"title": "a"}}, actor="claude")
+    assert events.dispatch_once(task_api.db) == 1
+    assert out.read_text() == "任务 a 已完成，操作者 claude"
 
 
 def test_webhook_action_payload_and_signature(monkeypatch, task_api):
     calls = []
 
     class Response:
+        status_code = 200
+
         def raise_for_status(self):
             pass
 
@@ -159,6 +174,31 @@ def test_webhook_action_payload_and_signature(monkeypatch, task_api):
     assert call["headers"]["X-DT-Signature"] == hmac.new(
         b"s3cret", call["raw"].encode(), hashlib.sha256
     ).hexdigest()
+    assert task_api("GET", "/bindings/hook/deliveries")[0]["last_result"] == "HTTP 200"
+
+
+def test_webhook_action_carries_prompt(monkeypatch, task_api):
+    calls = []
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+    def post(url, content=None, headers=None, timeout=None):
+        calls.append(json.loads(content))
+        return Response()
+
+    monkeypatch.setattr(events.httpx, "post", post)
+    task_api("POST", "/bindings", {
+        "name": "hook", "ops": ["insert"], "table": "task",
+        "action": "webhook", "config": {"url": "http://127.0.0.1:9000/hook"},
+        "prompt": "请检查 ${record.title}",
+    })
+    task_api.insert("task", {"title": "a"})
+    assert events.dispatch_once(task_api.db) == 1
+    assert calls[0]["prompt"] == "请检查 a"
 
 
 def test_failed_delivery_backs_off(task_api):
@@ -171,6 +211,7 @@ def test_failed_delivery_backs_off(task_api):
     delivery = task_api("GET", "/bindings/bad/deliveries")[0]
     assert delivery["status"] == "pending" and delivery["attempts"] == 1
     assert delivery["next_attempt_at"] and "命令退出码 3" in delivery["last_error"]
+    assert delivery["last_result"] is None
     assert events.dispatch_once(task_api.db) == 0  # 还没到下次重试时间
 
 
@@ -196,6 +237,22 @@ def test_binding_crud_and_validation(task_api):
     assert task_api("PATCH", "/bindings/x", {"enabled": False})["enabled"] is False
     assert task_api("DELETE", "/bindings/x")["deleted"] == "x"
     assert task_api("GET", "/bindings") == []
+
+
+def test_delivery_detail_includes_events(task_api):
+    task_api("POST", "/bindings", {
+        "name": "cmd", "ops": ["insert"], "table": "task",
+        "action": "command", "config": {"cmd": "cat > /dev/null"},
+    })
+    rec = task_api.insert("task", {"title": "a"})
+    assert events.dispatch_once(task_api.db) == 1
+    delivery = task_api("GET", "/bindings/cmd/deliveries")[0]
+    detail = task_api("GET", f"/bindings/cmd/deliveries/{delivery['id']}")
+    assert detail["status"] == "sent" and detail["last_result"] == "退出码 0"
+    assert detail["created_at"] and detail["updated_at"]
+    assert [event["seq"] for event in detail["events"]] == delivery["seqs"]
+    assert detail["events"][0]["record_id"] == rec["_id"]
+    assert task_api.err("GET", "/bindings/cmd/deliveries/999")["code"] == "not_found"
 
 
 def test_ws_events_filters(task_api):
@@ -240,6 +297,8 @@ def test_webhook_batch_payload(monkeypatch, task_api):
     calls = []
 
     class Response:
+        status_code = 200
+
         def raise_for_status(self):
             pass
 
@@ -356,6 +415,21 @@ def test_backfill_old_changes(tmp_path):
     reopened.conn.close()
 
 
+def test_migrate_prompt_columns(tmp_path):
+    from dt.db import Database
+
+    path = tmp_path / "dt.db"
+    db = Database(path)
+    db.conn.execute("ALTER TABLE dt_bindings DROP COLUMN prompt")
+    db.conn.execute("ALTER TABLE dt_inbox DROP COLUMN prompt")
+    db.conn.close()
+
+    reopened = Database(path)
+    assert "prompt" in {r["name"] for r in reopened.conn.execute("PRAGMA table_info(dt_bindings)")}
+    assert "prompt" in {r["name"] for r in reopened.conn.execute("PRAGMA table_info(dt_inbox)")}
+    reopened.conn.close()
+
+
 def test_inbox_action_defaults_and_read_state(task_api):
     task_api("POST", "/bindings", {
         "name": "inbox", "table": "task", "action": "inbox", "config": {},
@@ -386,12 +460,27 @@ def test_inbox_templates_and_batch(task_api):
             "title": "${record.title} → ${fields.status.after}",
             "body": "操作者 ${event.actor}，事件 #${event.seq}",
         },
+        "prompt": "请处理 ${record.title}",
     })
     task_api("POST", "/tables/task/records", {"rows": [{"title": "a"}, {"title": "b"}]})
     assert events.dispatch_once(task_api.db) == 1
     messages = task_api("GET", "/inbox")["items"]
     assert [m["title"] for m in messages] == ["b → 待办", "a → 待办"]
     assert all("事件 #" in m["body"] for m in messages)
+    assert [m["prompt"] for m in messages] == ["请处理 b", "请处理 a"]
+    assert task_api("GET", "/bindings/inbox/deliveries")[0]["last_result"] == "写入 2 条"
+
+
+def test_binding_prompt_validation_and_update(task_api):
+    assert task_api.err("POST", "/bindings", {
+        "name": "x", "table": "task", "action": "command", "config": {"cmd": "true"}, "prompt": 3,
+    })["code"] == "invalid_binding"
+    task_api("POST", "/bindings", {
+        "name": "x", "table": "task", "action": "command", "config": {"cmd": "true"}, "prompt": "hi",
+    })
+    assert task_api("GET", "/bindings")[0]["prompt"] == "hi"
+    assert task_api("PATCH", "/bindings/x", {"prompt": "yo ${record.title}"})["prompt"] == "yo ${record.title}"
+    assert task_api("PATCH", "/bindings/x", {"prompt": None})["prompt"] is None
 
 
 def test_inbox_retry_does_not_duplicate(task_api):

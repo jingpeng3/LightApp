@@ -44,6 +44,8 @@ export interface DrawCtx {
   tableColor: (name: string | undefined) => string;
   selected: string | null;
   near: Set<string> | null;
+  /** 路径上的边（SimLink.key）；有值时只有这些边高亮 */
+  path: Set<string> | null;
   pulses: Map<string, Pulse>;
   /** 缩放不够时，只有连接数不低于它的记录显示标题 */
   labelDeg: number;
@@ -116,13 +118,14 @@ export function drawNode(n: SimNode, ctx: CanvasRenderingContext2D, scale: numbe
   ctx.globalAlpha = 1;
 }
 
-/** 选中节点时，只有和它相连的边保持原样。 */
-const faded = (l: SimLink, d: DrawCtx) => d.selected != null && endId(l.source) !== d.selected && endId(l.target) !== d.selected;
+/** 选中节点时，只有和它相连的边保持原样；显示路径时只有路径上的边保持原样。 */
+const faded = (l: SimLink, d: DrawCtx) =>
+  d.path ? !d.path.has(l.key) : d.selected != null && endId(l.source) !== d.selected && endId(l.target) !== d.selected;
 
 export function linkColor(l: SimLink, d: DrawCtx) {
   const now = Date.now(), p = d.palette;
   if (l.dying != null) return alpha(p.danger, Math.max(0, 1 - (now - l.dying) / FADE_MS));
-  if (l.born != null && now - l.born < 1500) return p.accent;
+  if ((l.born != null && now - l.born < 1500) || d.path?.has(l.key)) return p.accent;
   const k = faded(l, d) ? 0.15 : 1;
   if (l.kind === "actor") return alpha(solid(actorColor(endId(l.source).slice(2)), p), 0.35 * k);
   if (l.kind === "link") return alpha(d.tableColor(l.owner), 0.6 * k);
@@ -130,8 +133,33 @@ export function linkColor(l: SimLink, d: DrawCtx) {
 }
 
 export function linkWidth(l: SimLink, d: DrawCtx, tablesView: boolean) {
-  if (l.born != null && Date.now() - l.born < 1500) return 2.5;
+  if ((l.born != null && Date.now() - l.born < 1500) || d.path?.has(l.key)) return 2.5;
   if (tablesView) return 1 + Math.min(5, Math.log2(1 + (l.count ?? 0)) * 0.6);
   const base = l.kind === "actor" ? 0.6 + Math.min(1.6, (l.count ?? 1) * 0.15) : 1;
   return d.selected != null && !faded(l, d) ? base + 0.8 : base;
+}
+
+/** Alt+拖动建 link 时，从节点原来的位置到当前位置画一条虚线。 */
+export function drawDragLine(ctx: CanvasRenderingContext2D, scale: number,
+  drag: { id: string; x0: number; y0: number; hit: SimNode | null } | null, m: { nodes: Map<string, SimNode> } | null, p: Palette) {
+  const n = drag && m?.nodes.get(drag.id);
+  if (!drag || !n || n.x == null) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(drag.x0, drag.y0);
+  ctx.lineTo(n.x, n.y!);
+  ctx.setLineDash([4 / scale, 3 / scale]);
+  ctx.lineWidth = 1.5 / scale;
+  ctx.strokeStyle = p.accent;
+  ctx.stroke();
+  // 松手就会连上的目标
+  const h = drag.hit;
+  if (h?.x != null) {
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(h.x, h.y!, radius(h) + 4 / scale, 0, Math.PI * 2);
+    ctx.lineWidth = 2 / scale;
+    ctx.stroke();
+  }
+  ctx.restore();
 }

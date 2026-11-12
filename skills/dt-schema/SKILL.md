@@ -7,7 +7,7 @@ description: 用 dt CLI 设计和修改动态表格的模版（表结构）：�
 
 `dt` 是本机的动态表格服务。数据分成多个**域**（比如一个项目一个域），每个域里有多张表；表名只在域内唯一，不同域可以有同名的表，数据互相隔离。一个表模版（YAML）定义一张表和它的子表树，一个域模版定义整个域里的所有表。
 
-除 `dt domain ...` 外，每条命令都要写 `-D <域>`（dt 不读环境变量里的域）；所有写入命令（apply 不带 `--dry-run`、field add、drop）都要写 `-A <你的名字>`。每次调用都显式写，不要依赖 `export`。服务没启动时 CLI 会自动拉起。所有命令输出 JSON：成功 `{"ok": true, "domain": "...", "data": ...}`，失败 `{"ok": false, "error": {"code", "message", "hint"}}`，失败时按 `hint` 修正后重试。
+除 `dt domain ...` 外，每条命令都要写 `-D <域>`（dt 不读环境变量里的域）；所有写入命令（apply 不带 `--dry-run`、domain create、field add、drop）都要写 `-A <你的名字>`。每次调用都显式写，不要依赖 `export`。服务没启动时 CLI 会自动拉起。所有命令输出 JSON：成功 `{"ok": true, "domain": "...", "data": ...}`，失败 `{"ok": false, "error": {"code", "message", "hint"}}`，失败时按 `hint` 修正后重试。
 
 ## 流程
 

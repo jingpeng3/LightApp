@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 from contextlib import contextmanager
+import json
 import mimetypes
 import os
 from pathlib import Path
@@ -200,6 +201,12 @@ def create_app(db: Database | None = None, *, dispatcher: bool = True) -> FastAP
         with write(request, domain) as tx:
             return ok(records.attach(tx, get_table(tx.conn, tx.domain_id, name), record_id, body.field, body.paths))
 
+    @app.get(D + "/tables/{name}/records/{record_id}/impact")
+    def delete_impact(domain: str, name: str, record_id: int):
+        """删除前预览：会一起删的子记录、会被去掉引用的记录、挡住删除的 restrict 子表。"""
+        with db.read() as conn:
+            return ok(graph.impact(conn, table_of(conn, domain, name), record_id))
+
     @app.delete(D + "/tables/{name}/records/{record_id}")
     def delete(domain: str, name: str, record_id: int, request: Request):
         with write(request, domain) as tx:
@@ -223,12 +230,83 @@ def create_app(db: Database | None = None, *, dispatcher: bool = True) -> FastAP
         return ok({"items": items, "seq": cursor})
 
     @app.get(D + "/graph")
-    def graph_view(domain: str, tables: str | None = None, limit: int = 3000):
-        """知识图谱：tables 是逗号分隔的表名，省略表示整个域。"""
+    def graph_view(domain: str, tables: str | None = None, limit: int = 3000, at: int | None = None, format: str | None = None):
+        """知识图谱：tables 是逗号分隔的表名，省略表示整个域；at 是变更 seq，返回那一刻的图。"""
+        graph.check_format(format)
         with db.read() as conn:
             did = get_domain(conn, domain)["id"]
             names = None if tables is None else [x for x in tables.split(",") if x]
-            return ok(graph.build(conn, domain, did, names, min(max(limit, 0), 10000)))
+            data = graph.build(conn, domain, did, names, min(max(limit, 0), 10000), at)
+            return ok(_exported(conn, did, format, data))
+
+    def _names(tables: str | None):
+        return None if tables is None else [x for x in tables.split(",") if x]
+
+    def _ids(value: str | None) -> list[int]:
+        out = []
+        for x in (value or "").split(","):
+            if x.strip():
+                if not x.strip().isdigit():
+                    raise DtError("invalid_query", f"记录 id {x.strip()!r} 不是整数")
+                out.append(int(x))
+        return out
+
+    def _json(value: str | None, what: str):
+        """GET 接口里的 where / done 是 JSON 字符串。"""
+        if value is None:
+            return None
+        try:
+            return json.loads(value)
+        except ValueError as e:
+            raise DtError("invalid_json", f"{what} 不是合法 JSON：{e}")
+
+    def _exported(conn, did: int, format: str | None, data: dict):
+        if format is None:
+            return data
+        return {"format": format, "text": graph.render(format, conn, did, data["nodes"], data["edges"])}
+
+    @app.get(D + "/graph/related")
+    def graph_related(domain: str, ids: str | None = None, actor: str | None = None, depth: str = "1",
+                      direction: str = "both", kinds: str | None = None, tables: str | None = None, limit: int = 500,
+                      where: str | None = None, since: int | None = None, fields: str | None = None, format: str | None = None):
+        """ids 是逗号分隔的记录 _id；depth 是跳数或 all；where 是查询 DSL 的 JSON；fields 是 * 或逗号分隔的字段。"""
+        graph.check_format(format)
+        seeds, cond = _ids(ids), _json(where, "where")
+        with db.read() as conn:
+            did = get_domain(conn, domain)["id"]
+            data = graph.related(conn, domain, did, seeds, actor, depth, direction, kinds, _names(tables), min(max(limit, 1), 5000),
+                                 cond, since, fields)
+            return ok(_exported(conn, did, format, data))
+
+    @app.get(D + "/graph/path")
+    def graph_path(domain: str, source: int, target: int, direction: str = "both", kinds: str | None = None, format: str | None = None):
+        graph.check_format(format)
+        with db.read() as conn:
+            did = get_domain(conn, domain)["id"]
+            return ok(_exported(conn, did, format, graph.path(conn, did, source, target, direction, kinds)))
+
+    @app.get(D + "/graph/lint")
+    def graph_lint(domain: str, tables: str | None = None, limit: int = 200):
+        with db.read() as conn:
+            return ok(graph.lint(conn, get_domain(conn, domain)["id"], _names(tables), min(max(limit, 0), 5000)))
+
+    @app.get(D + "/graph/ready")
+    def graph_ready(domain: str, field: str, done: str, where: str | None = None, limit: int = 200, fields: str | None = None):
+        """field 是 <表>.<字段> 的 link 字段，持有方依赖被引用方；done 是「已完成」条件的 JSON。"""
+        cond_done, cond = _json(done, "done"), _json(where, "where")
+        with db.read() as conn:
+            return ok(graph.ready(conn, get_domain(conn, domain)["id"], field, cond_done, cond, min(max(limit, 0), 5000), fields))
+
+    @app.get(D + "/graph/order")
+    def graph_order(domain: str, field: str, ids: str | None = None, done: str | None = None):
+        roots, cond_done = _ids(ids), _json(done, "done")
+        with db.read() as conn:
+            return ok(graph.order(conn, get_domain(conn, domain)["id"], field, roots or None, cond_done))
+
+    @app.get(D + "/graph/hubs")
+    def graph_hubs(domain: str, tables: str | None = None, kinds: str | None = None, limit: int = 20):
+        with db.read() as conn:
+            return ok(graph.hubs(conn, get_domain(conn, domain)["id"], _names(tables), kinds, min(max(limit, 1), 1000)))
 
     @app.get(D + "/inbox")
     def list_inbox(domain: str, status: str | None = None, limit: int = 100, offset: int = 0):
@@ -263,6 +341,11 @@ def create_app(db: Database | None = None, *, dispatcher: bool = True) -> FastAP
     def deliveries(domain: str, name: str, status: str | None = None, limit: int = 100):
         with db.read() as conn:
             return ok(events.list_deliveries(conn, domain, name, status, limit))
+
+    @app.get(D + "/bindings/{name}/deliveries/{delivery_id}")
+    def delivery_detail(domain: str, name: str, delivery_id: int):
+        with db.read() as conn:
+            return ok(events.get_delivery(conn, domain, name, delivery_id))
 
     @app.post(D + "/bindings/{name}/retry")
     def retry_binding(domain: str, name: str, request: Request):
