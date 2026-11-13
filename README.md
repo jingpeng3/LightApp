@@ -33,7 +33,9 @@ dt 是一个本机运行的动态表格。它要解决的不是「再做一个�
 
 <p align="center"><sub>表格视图：任务与嵌套子表、状态标签、操作者和附件；左侧可切换收件箱、事件与图谱</sub></p>
 
-[▶ 74 秒演示视频](docs/videos/dt-demo.mp4)：四个 Agent 在同一份数据上推进一条内容生产流水线，表格、知识图谱、事件流和收件箱实时跟着长出来。
+https://github.com/user-attachments/assets/7106e20d-2037-4b98-ba50-96e0ff5c77ea
+
+<p align="center"><sub>74 秒演示视频：四个 Agent 在同一份数据上推进一条内容生产流水线，表格、知识图谱、事件流和收件箱实时跟着长出来</sub></p>
 
 ## 快速开始
 

@@ -33,7 +33,9 @@ For a full capability overview (including the TEAMS case study), see [docs/intro
 
 <p align="center"><sub>Table view: tasks with nested child tables, status tags, actors, and attachments; the sidebar switches between inbox, events, and the graph</sub></p>
 
-[▶ 74-second demo video](docs/videos/dt-demo.mp4): four agents drive one content pipeline over the same data, while the table, knowledge graph, event stream, and inbox grow in real time.
+https://github.com/user-attachments/assets/7106e20d-2037-4b98-ba50-96e0ff5c77ea
+
+<p align="center"><sub>74-second demo: four agents drive one content pipeline over the same data, while the table, knowledge graph, event stream, and inbox grow in real time</sub></p>
 
 ## Quick start
 
