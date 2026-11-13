@@ -13,3 +13,5 @@ src/dt/static/
 build/
 .claude/skills/
 .claude/settings.local.json
+
+demo/
