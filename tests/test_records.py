@@ -12,8 +12,8 @@ def test_validation_errors_have_hints(task_api):
     assert err["code"] == "invalid_value" and "待办、进行中、完成" in err["hint"]
     err = task_api.err("POST", "/tables/task/records", {"data": {"title": "a", "nope": 1}})
     assert err["code"] == "unknown_field" and "title" in err["hint"]
-    err = task_api.err("POST", "/tables/task/records", {"data": {"title": "a", "due": "2026/11/06"}})
-    assert "YYYY-MM-DD" in err["hint"]
+    err = task_api.err("POST", "/tables/task/records", {"data": {"title": "a", "due": "11 月 6 日"}})
+    assert "2026-11-06" in err["hint"]
     err = task_api.err("POST", "/tables/task/records", {"data": {"title": "a", "no": 5}})
     assert err["code"] == "readonly_field"
     err = task_api.err("POST", "/tables/task/records", {"data": {"title": "a", "_id": 5}})

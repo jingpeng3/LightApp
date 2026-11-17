@@ -2,19 +2,20 @@ import { Check, ExternalLink } from "lucide-react";
 import type { Attachment, Field, FileState, Rec } from "../api";
 import { asList, cx, recordHash } from "../util";
 import { AttachmentChip } from "./attachments";
-import { LinkText } from "./linkText";
+import { Highlight, hits, LinkText } from "./linkText";
 import { Tag, useApp } from "./ui";
 
 export function optionColor(f: Field, value: string) {
   return f.options?.find((o) => o.value === value)?.color;
 }
 
-/** 表格单元格和抽屉里的只读展示。 */
-export function CellView({ field: f, value, rec, states }: {
+/** 表格单元格和抽屉里的只读展示。terms 是当前的搜索词，命中的文字高亮、命中的标签加框。 */
+export function CellView({ field: f, value, rec, states, terms }: {
   field: Field;
   value: unknown;
   rec: Rec;
   states?: FileState[];
+  terms?: string[];
 }) {
   const { openRecord, domain } = useApp();
   if (f.type === "checkbox") {
@@ -27,11 +28,11 @@ export function CellView({ field: f, value, rec, states }: {
   if (value == null || value === "" || (Array.isArray(value) && !value.length)) return null;
   switch (f.type) {
     case "single_select":
-      return <Tag value={String(value)} color={optionColor(f, String(value))} dim={!f.options?.some((o) => o.value === value)} />;
+      return <Tag value={String(value)} color={optionColor(f, String(value))} dim={!f.options?.some((o) => o.value === value)} hit={hits(String(value), terms)} />;
     case "multi_select":
       return (
         <span className="flex min-w-0 gap-1 overflow-hidden">
-          {asList<string>(value).map((v) => <Tag key={v} value={v} color={optionColor(f, v)} />)}
+          {asList<string>(value).map((v) => <Tag key={v} value={v} color={optionColor(f, v)} hit={hits(v, terms)} />)}
         </span>
       );
     case "number":
@@ -44,19 +45,19 @@ export function CellView({ field: f, value, rec, states }: {
     case "url":
       return (
         <a href={String(value)} target="_blank" rel="noopener noreferrer" title={String(value)} onClick={(e) => e.stopPropagation()} className="inline-flex w-full min-w-0 items-center gap-1 text-accent hover:underline">
-          <span className="truncate">{String(value).replace(/^https?:\/\//, "")}</span>
+          <span className="truncate"><Highlight text={String(value).replace(/^https?:\/\//, "")} terms={terms} /></span>
           <ExternalLink size={11} className="shrink-0" />
         </a>
       );
     case "email":
-      return <a href={`mailto:${value}`} onClick={(e) => e.stopPropagation()} className="truncate text-accent hover:underline">{String(value)}</a>;
+      return <a href={`mailto:${value}`} onClick={(e) => e.stopPropagation()} className="truncate text-accent hover:underline"><Highlight text={String(value)} terms={terms} /></a>;
     case "person":
       return (
         <span className="inline-flex min-w-0 items-center gap-1.5">
           <span className="flex size-[18px] shrink-0 items-center justify-center rounded-full bg-raise text-[10px] font-medium text-ink-2 ring-1 ring-line-strong">
             {String(value).slice(0, 1).toUpperCase()}
           </span>
-          <span className="truncate">{String(value)}</span>
+          <span className="truncate"><Highlight text={String(value)} terms={terms} /></span>
         </span>
       );
     case "link":
@@ -96,10 +97,16 @@ export function CellView({ field: f, value, rec, states }: {
     case "long_text":
       return (
         <span className="block truncate text-ink-2" title={String(value)}>
-          <LinkText text={String(value).split("\n")[0]} />
+          <LinkText text={firstHitLine(String(value), terms)} terms={terms} />
         </span>
       );
     default:
-      return <span className="truncate">{String(value)}</span>;
+      return <span className="truncate"><Highlight text={String(value)} terms={terms} /></span>;
   }
+}
+
+/** 长文本只显示一行：有搜索词时显示第一处命中所在的那一行，否则显示第一行。 */
+function firstHitLine(text: string, terms?: string[]) {
+  const lines = text.split("\n");
+  return lines.find((l) => hits(l, terms)) ?? lines[0];
 }

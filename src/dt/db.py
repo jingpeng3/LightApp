@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sqlite3
 import threading
 import uuid
@@ -138,6 +139,19 @@ CREATE TABLE IF NOT EXISTS dt_inbox (
     read_at TEXT,
     UNIQUE (binding_id, event_seq)
 );
+CREATE TABLE IF NOT EXISTS dt_views (
+    id INTEGER PRIMARY KEY,
+    table_id INTEGER NOT NULL REFERENCES dt_tables(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT,
+    where_expr TEXT,
+    sort TEXT,
+    created_by TEXT,
+    updated_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (table_id, name)
+);
 """
 
 # 依赖新列的索引放在迁移之后建
@@ -228,6 +242,7 @@ class Database:
         self._migrate(path)
         self.conn.executescript(INDEXES)
         self._migrate_events()
+        self._migrate_times(path)
         self.lock = threading.RLock()
         self.listeners: list = []  # 每次提交写事务后调用，用于实时推送
 
@@ -271,6 +286,48 @@ class Database:
                     "INSERT OR IGNORE INTO dt_change_fields (seq, field) VALUES (?, ?)",
                     [(row["seq"], key) for key in fields],
                 )
+            self.conn.execute("COMMIT")
+        except BaseException:
+            self.conn.execute("ROLLBACK")
+            raise
+
+    def _migrate_times(self, path):
+        """datetime 字段统一存成 UTC 毫秒格式。旧库里不带时区、没有毫秒的值按服务所在时区换算重写，改之前先备份。"""
+        from dt.fields import to_datetime
+
+        canonical = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
+        fields = self.conn.execute("SELECT table_id, key, default_value FROM dt_fields WHERE type = 'datetime'").fetchall()
+        updates, defaults = [], []
+        for f in fields:
+            path_ = f"$.{f['key']}"
+            for r in self.conn.execute(
+                "SELECT id, json_extract(data, ?) AS v FROM dt_records WHERE table_id = ? AND json_extract(data, ?) IS NOT NULL",
+                (path_, f["table_id"], path_),
+            ):
+                if isinstance(r["v"], str) and canonical.match(r["v"]):
+                    continue
+                try:
+                    updates.append((path_, to_datetime(r["v"]), r["id"]))
+                except ValueError:
+                    pass  # 认不出来的旧值原样保留，不在启动时丢数据
+            if f["default_value"] is not None:
+                old = json.loads(f["default_value"])
+                if isinstance(old, str) and not canonical.match(old):
+                    try:
+                        defaults.append((dumps(to_datetime(old)), f["table_id"], f["key"]))
+                    except ValueError:
+                        pass
+        if not updates and not defaults:
+            return
+        if str(path) != ":memory:":
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            dest = sqlite3.connect(Path(f"{path}.bak-{datetime.now().strftime('%Y%m%d%H%M%S')}"))
+            self.conn.backup(dest)
+            dest.close()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self.conn.executemany("UPDATE dt_records SET data = json_set(data, ?, ?) WHERE id = ?", updates)
+            self.conn.executemany("UPDATE dt_fields SET default_value = ? WHERE table_id = ? AND key = ?", defaults)
             self.conn.execute("COMMIT")
         except BaseException:
             self.conn.execute("ROLLBACK")

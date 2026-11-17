@@ -372,7 +372,7 @@ def matching(conn, idx: Index, ids, where: dict, what: str = "where") -> set:
     hit = set()
     for name in usable:
         table = idx.by_name[name]
-        cond, params = compile_where(table, where)
+        cond, params = compile_where(table, where, conn)
         hit |= {r[0] for r in conn.execute(
             f"SELECT r.id FROM dt_records r WHERE r.table_id = ? AND r.id IN (SELECT value FROM json_each(?)) AND {cond}",
             (table.id, json.dumps(by_table[name]), *params),

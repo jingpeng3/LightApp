@@ -73,7 +73,8 @@ export interface Change {
   domain: string | null;
   table_name: string;
   record_id: number | null;
-  op: "insert" | "update" | "delete" | "create_table" | "alter_table" | "drop_table" | "create_domain" | "alter_domain" | "drop_domain";
+  op: "insert" | "update" | "delete" | "create_table" | "alter_table" | "drop_table" | "create_domain" | "alter_domain" | "drop_domain"
+    | "create_view" | "alter_view" | "drop_view";
   before: Rec | null;
   after: Rec | null;
   actor: string | null;
@@ -257,6 +258,30 @@ export interface QueryBody {
   offset?: number;
   include?: string | null;
   parent_id?: number | null;
+  view?: string | null;
+}
+
+/** 表上存下来的一组查询条件和排序。 */
+export interface SavedView {
+  id: number;
+  table: string;
+  name: string;
+  description: string | null;
+  where: Record<string, unknown> | null;
+  sort: string | null;
+  created_by: string | null;
+  updated_at: string;
+}
+
+export interface Facet {
+  values: { value: unknown; count: number }[];
+  empty: number;
+}
+
+export interface SearchGroup {
+  table: string;
+  total: number;
+  items: { id: number; title: string; parent_id: number | null; record: Rec }[];
 }
 
 export class ApiError extends Error {
@@ -300,6 +325,13 @@ export const api = {
   domains: () => req<Domain[]>("GET", "/domains"),
   tables: () => req<TableInfo[]>("GET", `${d()}/tables`),
   query: (table: string, body: QueryBody) => req<{ items: Rec[]; total: number }>("POST", `${t(table)}/query`, body),
+  facets: (table: string, body: { fields?: string[]; where?: Record<string, unknown> | null; parent_id?: number | null; view?: string | null }) =>
+    req<{ total: number; fields: Record<string, Facet> }>("POST", `${t(table)}/facets`, body),
+  search: (q: string, limit = 5) => req<{ q: string; groups: SearchGroup[] }>("GET", `${d()}/search?` + query({ q, limit })),
+  views: () => req<SavedView[]>("GET", `${d()}/views`),
+  saveView: (body: { table: string; name: string; where: Record<string, unknown> | null; sort: string | null }) =>
+    req<SavedView>("POST", `${d()}/views`, body),
+  deleteView: (id: number) => req<{ deleted: number }>("DELETE", `${d()}/views/${id}`),
   get: (table: string, id: number) => req<Rec>("GET", `${t(table)}/records/${id}`),
   insert: (table: string, data: Record<string, unknown>, parent_id?: number | null) =>
     req<Rec>("POST", `${t(table)}/records`, { data, parent_id: parent_id ?? null }),

@@ -1,14 +1,15 @@
-import { Activity, Check, ChevronRight, ChevronsUpDown, Mail, Moon, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Sun } from "lucide-react";
+import { Activity, Bookmark, Check, ChevronRight, ChevronsUpDown, Mail, Moon, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Search, Sun, X } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
-import type { Domain, TableInfo } from "../api";
-import { cx, tableLabel } from "../util";
+import type { Domain, SavedView, TableInfo } from "../api";
+import { api } from "../api";
+import { ask, cx, tableLabel, toastError } from "../util";
 import { useUnread } from "./inbox";
 import { Popover, useApp } from "./ui";
 
 const ICON_BTN = "flex size-7 shrink-0 items-center justify-center rounded-md text-ink-2 hover:bg-raise hover:text-ink";
 
 /** 左侧表树：顶层表下面缩进显示子表，层数不限。收起时只留图标和表名首字。 */
-export function Sidebar({ domain, domains, onSwitch, current, theme, onTheme, collapsed, onCollapse, feedOpen, onToggleFeed }: {
+export function Sidebar({ domain, domains, onSwitch, current, theme, onTheme, collapsed, onCollapse, feedOpen, onToggleFeed, onSearch }: {
   domain: Domain;
   domains: Domain[];
   onSwitch: (name: string) => void;
@@ -19,6 +20,7 @@ export function Sidebar({ domain, domains, onSwitch, current, theme, onTheme, co
   onCollapse: () => void;
   feedOpen: boolean;
   onToggleFeed: () => void;
+  onSearch: () => void;
 }) {
   const { tables, byName, select } = useApp();
   const roots = tables.filter((t) => t.parent === null);
@@ -45,6 +47,7 @@ export function Sidebar({ domain, domains, onSwitch, current, theme, onTheme, co
         </div>
         <DomainPicker domain={domain} domains={domains} onSwitch={onSwitch} collapsed />
         <div className="mt-3 flex flex-col gap-1">
+          <NavItem icon={<Search size={14} />} label="搜索 ⌘K" active={false} onClick={onSearch} collapsed />
           <NavItem icon={<Mail size={14} />} label="收件箱" active={current === "@inbox"} onClick={() => select("@inbox")} collapsed badge={unread} />
           <NavItem icon={<Activity size={14} />} label="事件" active={current === "@events"} onClick={() => select("@events")} collapsed />
           <NavItem icon={<Network size={14} />} label="图谱" active={current === "@graph"} onClick={() => select("@graph")} collapsed />
@@ -81,6 +84,7 @@ export function Sidebar({ domain, domains, onSwitch, current, theme, onTheme, co
       </div>
       <DomainPicker domain={domain} domains={domains} onSwitch={onSwitch} />
       <div className="mx-2 mt-3 flex flex-col gap-1">
+        <NavItem icon={<Search size={13} />} label="搜索" hint="⌘K" active={false} onClick={onSearch} />
         <NavItem icon={<Mail size={13} />} label="收件箱" hint="inbox" active={current === "@inbox"} onClick={() => select("@inbox")} badge={unread} />
         <NavItem icon={<Activity size={13} />} label="事件" hint="event" active={current === "@events"} onClick={() => select("@events")} />
         <NavItem icon={<Network size={13} />} label="图谱" hint="graph" active={current === "@graph"} onClick={() => select("@graph")} />
@@ -141,7 +145,8 @@ function flatten(roots: TableInfo[], byName: Record<string, TableInfo>): TableIn
 }
 
 function TreeItem({ table, depth, current }: { table: TableInfo; depth: number; current: string | null }) {
-  const { byName, select } = useApp();
+  const { byName, select, views, currentView } = useApp();
+  const own = views.filter((v) => v.table === table.name);
   const kids = table.children.map((n) => byName[n]).filter(Boolean);
   const [open, setOpen] = useState(true);
   const active = current === table.name;
@@ -165,8 +170,32 @@ function TreeItem({ table, depth, current }: { table: TableInfo; depth: number; 
           <span className="ml-auto font-mono text-[10.5px] text-ink-3">{table.record_count}</span>
         </button>
       </div>
+      {own.map((v) => <ViewItem key={v.id} view={v} depth={depth} active={active && currentView === v.name} />)}
       {open && kids.map((k) => <TreeItem key={k.name} table={k} depth={depth + 1} current={current} />)}
     </>
+  );
+}
+
+/** 表下面的命名视图，点一下打开这张表并套用视图。 */
+function ViewItem({ view, depth, active }: { view: SavedView; depth: number; active: boolean }) {
+  const { openView, reloadViews } = useApp();
+  const remove = async () => {
+    if (!(await ask(`删除视图「${view.name}」？`, { body: "只删除这组查询条件，不影响记录。", ok: "删除" }))) return;
+    api.deleteView(view.id).then(reloadViews, toastError);
+  };
+  return (
+    <div
+      className={cx("group flex h-7 items-center rounded-md pr-1 text-[12.5px]", active ? "bg-surface text-ink shadow-[0_0_0_1px_var(--line)]" : "text-ink-2 hover:bg-raise hover:text-ink")}
+      style={{ paddingLeft: 26 + depth * 14 }}
+    >
+      <button type="button" onClick={() => openView(view.table, view.name)} title={view.description ?? `由 ${view.created_by ?? "?"} 保存`} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+        <Bookmark size={11} className={cx("shrink-0", active ? "text-accent" : "text-ink-3")} />
+        <span className="truncate">{view.name}</span>
+      </button>
+      <button type="button" title="删除视图" onClick={remove} className="flex size-5 shrink-0 items-center justify-center rounded text-ink-3 opacity-0 group-hover:opacity-100 hover:text-danger focus-visible:opacity-100">
+        <X size={11} />
+      </button>
+    </div>
   );
 }
 

@@ -7,10 +7,11 @@ import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Maximize2, Plus, Refresh
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { Field, Rec, TableInfo } from "../api";
 import { useRecords } from "../useRecords";
-import { actorColor, actorName, cx, fieldLabel, relTime } from "../util";
+import { actorColor, actorName, asList, cx, fieldLabel, relTime } from "../util";
 import { CellView } from "./cells";
 import { ChildTabs } from "./children";
 import { editMode, InlineInput, PopoverEditor } from "./editors";
+import { hits } from "./linkText";
 import { ActorChip, Empty, TypeGlyph, useApp } from "./ui";
 
 const WIDTH: Record<Field["type"], number> = {
@@ -56,38 +57,78 @@ function savedExpanded(key: string | null): number[] {
   }
 }
 
-export function Grid({ table, parentId, search = "", compact }: {
+const toSorting = (sort: string | null): SortingState =>
+  (sort ?? "").split(",").filter(Boolean).map((x) => ({ id: x.replace(/^[-+]/, ""), desc: x.startsWith("-") }));
+const fromSorting = (s: SortingState) => (s.length ? s.map((x) => (x.desc ? "-" : "") + x.id).join(",") : null);
+
+/** 筛选相关的输入，都由上层（筛选栏、展开的子表）给出。sort/onSort 给了时排序由上层管，否则表格自己记。 */
+export interface GridFilter {
+  where: Record<string, unknown> | null;
+  view?: string | null;
+  terms?: string[]; // 搜索词，用来高亮
+  sort?: string | null;
+  onSort?: (sort: string | null) => void;
+  deep?: boolean; // 搜索含子表：只靠子表命中的行自动展开，子表里也只显示命中的
+}
+
+const AUTO_OPEN_MAX = 20;
+
+/** 这条记录自己的字段里是不是每个搜索词都出现了（和服务端 $search 的规则大致一样）。 */
+function ownHit(table: TableInfo, rec: Rec, terms: string[]) {
+  return terms.every((t) => (/^#?\d+$/.test(t) && rec._id === Number(t.replace("#", ""))) || table.fields.some((f) => {
+    const v = rec[f.key];
+    if (v == null) return false;
+    if (f.type === "number" || f.type === "auto_number") return String(v) === t;
+    if (f.type === "attachment") return asList<{ path: string }>(v).some((a) => hits(a.path, [t]));
+    return asList<unknown>(v).some((x) => typeof x === "string" && hits(x, [t]));
+  }));
+}
+
+export function Grid({ table, parentId, filter, compact }: {
   table: TableInfo;
   parentId?: number | null;
-  search?: string;
+  filter?: GridFilter;
   compact?: boolean;
 }) {
   const { domain, byName, openRecord, openFull, openNew } = useApp();
   const viewKey = `dt-view:${domain}/${table.name}`;
   const [initial] = useState(() => savedView(viewKey, table));
-  const [sorting, setSorting] = useState<SortingState>(initial.sorting);
+  const [ownSorting, setOwnSorting] = useState<SortingState>(initial.sorting);
   const [sizing, setSizing] = useState<ColumnSizingState>(initial.sizing);
+  const controlled = !!filter?.onSort;
+  const sorting = controlled ? toSorting(filter!.sort ?? null) : ownSorting;
+  const setSorting = (u: SortingState | ((s: SortingState) => SortingState)) => {
+    const next = typeof u === "function" ? u(sorting) : u;
+    if (controlled) filter!.onSort!(fromSorting(next));
+    else setOwnSorting(next);
+  };
   // 拖动列宽时每帧都会变，停下来再写
   useEffect(() => {
-    const t = setTimeout(() => localStorage.setItem(viewKey, JSON.stringify({ sorting, sizing })), 300);
+    const t = setTimeout(() => localStorage.setItem(viewKey, JSON.stringify({ sorting: ownSorting, sizing })), 300);
     return () => clearTimeout(t);
-  }, [viewKey, sorting, sizing]);
-  // 搜索框每敲一个字都会变，停顿 250ms 再查服务端
-  const [query, setQuery] = useState(search);
-  useEffect(() => {
-    const t = setTimeout(() => setQuery(search), 250);
-    return () => clearTimeout(t);
-  }, [search]);
+  }, [viewKey, ownSorting, sizing]);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(compact ? CHILD_PAGE_SIZE : savedPageSize);
-  const sort = sorting.length ? sorting.map((s) => (s.desc ? "-" : "") + s.id).join(",") : null;
-  const { rows, total, loading, stale, flashes, entering, leaving, statuses, update, reload } = useRecords(table, parentId, { page, pageSize, sort, search: query });
+  const sort = fromSorting(sorting);
+  const where = filter?.where ?? null;
+  const whereKey = JSON.stringify(where) + (filter?.view ?? "");
+  const filtering = where !== null || !!filter?.view;
+  const terms = filter?.terms;
+  const { rows, total, loading, stale, flashes, entering, leaving, statuses, update, reload } = useRecords(table, parentId, { page, pageSize, sort, where, view: filter?.view ?? null });
   const pages = Math.max(1, Math.ceil(total / pageSize));
   const [active, setActive] = useState<{ id: number; key: string } | null>(null);
   const [editing, setEditing] = useState<{ id: number; key: string; initial?: string } | null>(null);
   // 整表页面（parentId 为空）记住展开的行，刷新后还在；抽屉、行内子表里的是临时视图
   const expandedKey = parentId == null ? `dt-expanded:${domain}/${table.name}` : null;
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set(savedExpanded(expandedKey)));
+  // 含子表搜索时自动展开的行，不记进 localStorage；点一下箭头就收起
+  const [autoOpen, setAutoOpen] = useState<Set<number>>(new Set());
+  const termKey = terms?.join(" ") ?? "";
+  useEffect(() => {
+    const ts = termKey.split(" ").filter(Boolean);
+    if (!filter?.deep || !ts.length || !rows) return setAutoOpen(new Set());
+    setAutoOpen(new Set(rows.filter((r) => !ownHit(table, r, ts)).slice(0, AUTO_OPEN_MAX).map((r) => r._id)));
+  }, [rows, filter?.deep, termKey, table]);
   useEffect(() => {
     if (!expandedKey) return;
     const t = setTimeout(() => localStorage.setItem(expandedKey, JSON.stringify([...expanded])), 300);
@@ -120,8 +161,8 @@ export function Grid({ table, parentId, search = "", compact }: {
     setExpanded(new Set());
   }, [table.name, parentId, page]);
 
-  // 换了搜索词或排序就回到第一页；删除导致当前页超出范围时退回最后一页
-  useEffect(() => setPage(0), [query, sort]);
+  // 换了筛选条件或排序就回到第一页；删除导致当前页超出范围时退回最后一页
+  useEffect(() => setPage(0), [whereKey, sort]);
   useEffect(() => {
     if (page > pages - 1) setPage(pages - 1);
   }, [page, pages]);
@@ -279,7 +320,7 @@ export function Grid({ table, parentId, search = "", compact }: {
             {virt.getVirtualItems().map((vi) => {
               const row = sorted[vi.index];
               const rec = row.original;
-              const isOpen = expanded.has(rec._id);
+              const isOpen = expanded.has(rec._id) || autoOpen.has(rec._id);
               return (
                 <div
                   key={vi.key}
@@ -299,7 +340,10 @@ export function Grid({ table, parentId, search = "", compact }: {
                               <button
                                 type="button"
                                 title={isOpen ? "收起子表" : "展开子表"}
-                                onClick={() => setExpanded((s) => { const n = new Set(s); n.has(rec._id) ? n.delete(rec._id) : n.add(rec._id); return n; })}
+                                onClick={() => {
+                                  if (autoOpen.has(rec._id)) return setAutoOpen((s) => { const n = new Set(s); n.delete(rec._id); return n; });
+                                  setExpanded((s) => { const n = new Set(s); n.has(rec._id) ? n.delete(rec._id) : n.add(rec._id); return n; });
+                                }}
                                 className="flex size-5 items-center justify-center rounded text-ink-3 hover:bg-raise hover:text-ink"
                               >
                                 <ChevronRight size={13} className={cx("transition-transform", isOpen && "rotate-90")} />
@@ -367,7 +411,7 @@ export function Grid({ table, parentId, search = "", compact }: {
                             <InlineInput field={f} value={rec[id]} initial={editing.initial} onCommit={(v) => commit(rec, id, v)} onCancel={() => (setEditing(null), scrollRef.current?.focus())} />
                           ) : (
                             <span className="relative flex min-w-0 flex-1 items-center">
-                              <CellView field={f} value={rec[id]} rec={rec} states={statuses[rec._id]?.[id]} />
+                              <CellView field={f} value={rec[id]} rec={rec} states={statuses[rec._id]?.[id]} terms={terms} />
                             </span>
                           )}
                           {fl && (
@@ -381,7 +425,7 @@ export function Grid({ table, parentId, search = "", compact }: {
                   </div>
                   {isOpen && (
                     <div className="sticky left-0 border-b border-line bg-panel py-2 pr-3 pl-10" style={{ width: viewW }}>
-                      <ChildTabs table={table} parentId={rec._id} />
+                      <ChildTabs table={table} parentId={rec._id} search={filter?.deep && terms?.length ? terms.join(" ") : undefined} />
                     </div>
                   )}
                 </div>
@@ -391,7 +435,7 @@ export function Grid({ table, parentId, search = "", compact }: {
 
           {!sorted.length && (
             <div className="sticky left-0" style={{ width: viewW }}>
-              {search ? <Empty title="没有匹配的记录" /> : compact ? <div className="px-4 py-4 text-ink-3">还没有记录</div> : (
+              {filtering ? <Empty title="没有匹配的记录">{!compact && "换个搜索词，或者去掉一些筛选条件。"}</Empty> : compact ? <div className="px-4 py-4 text-ink-3">还没有记录</div> : (
                 <Empty title="空白的一页">
                   这张表还没有记录。让 agent 运行 <code className="font-mono text-ink-2">dt rec insert {table.name} -D {domain} --data '…'</code>，或者点下面的「新建记录」。
                 </Empty>
@@ -415,7 +459,7 @@ export function Grid({ table, parentId, search = "", compact }: {
       {(!compact || total > pageSize || stale > 0) && (
         <div className={cx("flex shrink-0 items-center gap-3 border-t border-line bg-panel px-3 font-mono text-[11px] text-ink-3", compact ? "h-8" : "h-9")}>
           <span>
-            {query.trim() ? `匹配 ${total} 条` : `${total} 条`}
+            {filtering ? `匹配 ${total} 条${parentId == null ? ` / 共 ${table.record_count}` : ""}` : `${total} 条`}
             {total > 0 && ` · ${page * pageSize + 1}–${Math.min((page + 1) * pageSize, total)}`}
           </span>
           {loading && <span className="text-ink-3">读取中…</span>}

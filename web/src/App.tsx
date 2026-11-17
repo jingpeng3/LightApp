@@ -1,21 +1,25 @@
-import { Plus, Search } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { Domain, FileState, TableInfo } from "./api";
+import { Layers, Plus, Search, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { Domain, FileState, SavedView, TableInfo } from "./api";
 import { api, setDomain } from "./api";
 import { PreviewModal } from "./components/attachments";
 import { NewRecordDrawer, RecordDrawer } from "./components/drawer";
 import { EventsView } from "./components/events";
 import { Feed } from "./components/feed";
+import { FilterBar } from "./components/filterBar";
 import { FullScreenRecord } from "./components/fullscreen";
 import { GraphView } from "./components/graph";
 import { Grid } from "./components/grid";
 import { InboxView } from "./components/inbox";
+import { SearchPalette } from "./components/searchPalette";
 import { Sidebar } from "./components/sidebar";
 import { Btn, Ctx, Empty, useApp, type AppCtx, type PreviewTarget, type Target } from "./components/ui";
+import { compileWhere, EMPTY_QUERY, terms, type TableQuery } from "./filters";
 import { onChange, startLive } from "./live";
+import { tableQueryHash, useTableQuery } from "./useTableQuery";
 import { cx, recordHash, tableHash, tableLabel, toastError, useAsk, useToasts } from "./util";
 
-/** 地址栏 hash 是 #域/表；多一段数字就是记录的 _id，图谱的筛选条件跟在 ? 后面。 */
+/** 地址栏 hash 是 #域/表；多一段数字就是记录的 _id，表的查询和图谱的筛选条件跟在 ? 后面。 */
 function fromHash() {
   const [path, qs = ""] = location.hash.slice(1).split("?");
   const [d, t, id] = decodeURIComponent(path).split("/");
@@ -85,30 +89,49 @@ function DomainView({ domain, domains, tableName, recordId, qs, onSwitch, onDoma
   const [record, setRecord] = useState<Target | null>(null);
   const [creating, setCreating] = useState<{ table: string; parentId?: number | null } | null>(null);
   const [preview, setPreview] = useState<{ target: PreviewTarget; state?: FileState } | null>(null);
-  const [search, setSearch] = useState("");
+  const [views, setViews] = useState<SavedView[]>([]);
+  const [palette, setPalette] = useState(false);
   const [feedOpen, toggleFeed] = usePanel("dt-feed", 1280);
   const [sidebarOpen, toggleSidebar] = usePanel("dt-sidebar", 1024);
   const [theme, setTheme] = useState(() => document.documentElement.dataset.theme ?? "light");
 
   const loadTables = useCallback(() => api.tables().then(setTables, toastError), []);
+  const loadViews = useCallback(() => api.views().then(setViews, toastError), []);
 
   useEffect(() => {
     loadTables();
-    // 表结构变化时重新拉表定义；记录增删时只更新计数
+    loadViews();
+    // 表结构变化时重新拉表定义和视图；记录增删时只更新计数
     return onChange((c) => {
-      if (c.op === "create_table" || c.op === "alter_table" || c.op === "drop_table") (loadTables(), onDomainsChanged());
+      if (c.op.endsWith("_view")) loadViews();
+      else if (c.op === "create_table" || c.op === "alter_table" || c.op === "drop_table") (loadTables(), loadViews(), onDomainsChanged());
       else if (c.op === "insert" || c.op === "delete") {
         setTables((ts) => ts?.map((t) => (t.name === c.table_name ? { ...t, record_count: t.record_count + (c.op === "insert" ? 1 : -1) } : t)) ?? ts);
       }
     });
-  }, [loadTables, onDomainsChanged]);
+  }, [loadTables, loadViews, onDomainsChanged]);
+
+  // ⌘K / Ctrl+K 打开全域搜索
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") (e.preventDefault(), setPalette((p) => !p));
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, []);
 
   const byName = useMemo(() => Object.fromEntries((tables ?? []).map((t) => [t.name, t])), [tables]);
   const table = (current && byName[current]) || (tables ?? []).find((t) => t.parent === null) || tables?.[0];
 
   const select = useCallback((name: string) => {
     location.hash = tableHash(domain.name, name);
-    setSearch("");
+  }, [domain.name]);
+
+  // 只有正在看表格时，查询状态才和地址栏同步
+  const onTable = !!table && !graphView && !inboxView && !eventsView && recordId == null;
+  const [query, setQuery] = useTableQuery(domain.name, table?.name ?? null, onTable ? qs : "", onTable);
+  const openView = useCallback((t: string, view: string) => {
+    location.hash = tableQueryHash(domain.name, t, { ...EMPTY_QUERY, view });
   }, [domain.name]);
 
   // 全屏记录由地址栏驱动：链接用 #域/表/_id，打开新标签页就能直接看这条记录
@@ -131,7 +154,11 @@ function DomainView({ domain, domains, tableName, recordId, qs, onSwitch, onDoma
       setPreview({ target });
       api.fileStatus([target.recordId]).then((s) => setPreview((p) => (p?.target === target ? { target, state: s[target.recordId]?.[target.field]?.[target.idx] } : p)), () => {});
     },
-  }), [domain.name, tables, byName, select, openFull]);
+    views,
+    reloadViews: loadViews,
+    openView,
+    currentView: onTable ? query.view : null,
+  }), [domain.name, tables, byName, select, openFull, views, loadViews, openView, onTable, query.view]);
 
   const toggleTheme = () => {
     const next = theme === "dark" ? "light" : "dark";
@@ -149,6 +176,7 @@ function DomainView({ domain, domains, tableName, recordId, qs, onSwitch, onDoma
           theme={theme} onTheme={toggleTheme}
           collapsed={!sidebarOpen} onCollapse={toggleSidebar}
           feedOpen={feedOpen} onToggleFeed={toggleFeed}
+          onSearch={() => setPalette(true)}
         />
         <main className="flex min-w-0 flex-1 flex-col">
           {tables === null ? (
@@ -166,12 +194,7 @@ function DomainView({ domain, domains, tableName, recordId, qs, onSwitch, onDoma
               </Empty>
             </div>
           ) : (
-            <>
-              <TableHeader key={table.name} table={table} search={search} onSearch={setSearch} />
-              <div className="flex min-h-0 flex-1 flex-col border-t border-line bg-surface">
-                <Grid key={table.name} table={table} search={search} />
-              </div>
-            </>
+            <TableView key={table.name} table={table} query={query} setQuery={setQuery} views={views} onSaved={loadViews} />
           )}
         </main>
         {feedOpen && <Feed />}
@@ -180,6 +203,7 @@ function DomainView({ domain, domains, tableName, recordId, qs, onSwitch, onDoma
       {full && <FullScreenRecord key={`${full.table}:${full.id}`} target={full} onClose={() => (location.hash = tableHash(domain.name, full.table))} />}
       {creating && <NewRecordDrawer key={creating.table} tableName={creating.table} parentId={creating.parentId} onClose={() => setCreating(null)} />}
       {preview && <PreviewModal key={`${preview.target.recordId}:${preview.target.field}:${preview.target.idx}`} target={preview.target} state={preview.state} onClose={() => setPreview(null)} />}
+      {palette && <SearchPalette onClose={() => setPalette(false)} />}
       <AskDialog />
       <Toasts />
     </Ctx.Provider>
@@ -200,15 +224,56 @@ function usePanel(key: string, minWidth: number) {
   return [open, toggle] as const;
 }
 
-function TableHeader({ table, search, onSearch }: {
+type SetQuery = (q: Partial<TableQuery> | ((q: TableQuery) => TableQuery)) => void;
+
+/** 一张表的页面：表头、筛选栏、表格。 */
+function TableView({ table, query, setQuery, views, onSaved }: {
   table: TableInfo;
-  search: string;
-  onSearch: (s: string) => void;
+  query: TableQuery;
+  setQuery: SetQuery;
+  views: SavedView[];
+  onSaved: () => void;
 }) {
+  const { byName } = useApp();
+  const view = query.view ? views.find((v) => v.table === table.name && v.name === query.view) : undefined;
+  const where = useMemo(() => compileWhere(table, byName, query), [table, byName, query]);
+  const filter = useMemo(() => ({
+    where,
+    // 视图被删了以后还按名字发给服务端会报错，这时只用页面上的条件
+    view: view ? view.name : null,
+    terms: terms(query.q),
+    sort: query.sort ?? view?.sort ?? null,
+    onSort: (sort: string | null) => setQuery({ sort }),
+    deep: query.deep,
+  }), [where, view, query.q, query.sort, query.deep, setQuery]);
+  return (
+    <>
+      <TableHeader table={table} query={query} setQuery={setQuery} />
+      <FilterBar table={table} query={query} setQuery={setQuery} views={views} onSaved={onSaved} />
+      <div className="flex min-h-0 flex-1 flex-col border-t border-line bg-surface">
+        <Grid table={table} filter={filter} />
+      </div>
+    </>
+  );
+}
+
+function TableHeader({ table, query, setQuery }: { table: TableInfo; query: TableQuery; setQuery: SetQuery }) {
   const { byName, select, openNew } = useApp();
   const ancestors: TableInfo[] = [];
   for (let t = table.parent ? byName[table.parent] : undefined; t; t = t.parent ? byName[t.parent] : undefined) ancestors.unshift(t);
   const desc = table.description ?? `${table.fields.length} 个字段${table.children.length ? ` · 子表 ${table.children.map((c) => tableLabel(byName[c], c)).join("、")}` : ""}`;
+  // 输入框每敲一个字都会变，停顿 250ms 再写进查询；pushed 是最后一次写进去的值，用来分辨外部的修改（清除、切换视图）
+  const [draft, setDraft] = useState(query.q);
+  const pushed = useRef(query.q);
+  useEffect(() => {
+    if (query.q !== pushed.current) (pushed.current = query.q, setDraft(query.q));
+  }, [query.q]);
+  useEffect(() => {
+    if (draft === pushed.current) return;
+    const t = setTimeout(() => ((pushed.current = draft), setQuery({ q: draft })), 250);
+    return () => clearTimeout(t);
+  }, [draft, setQuery]);
+  const kids = table.children.filter((c) => byName[c]);
   return (
     <header className="rise flex items-center gap-3 px-6 py-3">
       <div className="flex min-w-0 shrink items-baseline gap-1.5">
@@ -225,9 +290,32 @@ function TableHeader({ table, search, onSearch }: {
       {table.parent && <span className="shrink-0 rounded-[3px] border border-line-strong px-1 font-mono text-[10px] text-ink-3">{table.relation === "one_to_one" ? "一对一" : "一对多"} · {table.on_delete === "restrict" ? "限制删除" : "级联删除"}</span>}
       <p className="min-w-0 flex-1 truncate text-[12.5px] text-ink-3" title={desc}>{desc}</p>
       <div className="flex shrink-0 items-center gap-2">
-        <label className="flex h-8 w-[220px] items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2.5 focus-within:border-accent">
-          <Search size={13} className="text-ink-3" />
-          <input value={search} onChange={(e) => onSearch(e.target.value)} placeholder="搜索文本字段或 _id" className="w-full bg-transparent outline-none placeholder:text-ink-3" />
+        <label className="flex h-8 w-[260px] items-center gap-1.5 rounded-md border border-line-strong bg-surface pr-1 pl-2.5 focus-within:border-accent">
+          <Search size={13} className="shrink-0 text-ink-3" />
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => e.key === "Escape" && setDraft("")}
+            placeholder="搜索，多个词用空格隔开"
+            title="在文本、选项、标签、数字、附件路径里找；#12 按 _id 找"
+            style={{ outline: "none" }} // 外框已经用 focus-within 标出焦点
+            className="w-full min-w-0 bg-transparent placeholder:text-ink-3"
+          />
+          {draft && (
+            <button type="button" title="清空搜索" onClick={() => setDraft("")} className="flex size-5 shrink-0 items-center justify-center rounded text-ink-3 hover:text-ink">
+              <X size={12} />
+            </button>
+          )}
+          {kids.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setQuery({ deep: !query.deep })}
+              title={query.deep ? "搜索范围：本表和子表（子表里命中的记录，所在行也算命中）" : `搜索范围：只搜本表。点一下把子表（${kids.map((c) => tableLabel(byName[c], c)).join("、")}）也算上`}
+              className={cx("flex h-6 shrink-0 items-center gap-1 rounded px-1.5 text-[11px]", query.deep ? "bg-accent-soft text-accent" : "text-ink-3 hover:bg-raise hover:text-ink")}
+            >
+              <Layers size={12} /> 含子表
+            </button>
+          )}
         </label>
         {!table.parent && (
           <Btn kind="solid" onClick={() => openNew(table.name)} className="h-8 px-3"><Plus size={14} /> 新建记录</Btn>

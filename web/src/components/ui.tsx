@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { Attachment, FieldType, TableInfo } from "../api";
+import type { Attachment, FieldType, SavedView, TableInfo } from "../api";
 import { actorColor, actorName, cx } from "../util";
 
 export interface Target {
@@ -24,16 +24,22 @@ export interface AppCtx {
   openFull: (t: Target) => void;
   openNew: (table: string, parentId?: number | null) => void;
   preview: (p: PreviewTarget) => void;
+  views: SavedView[];
+  reloadViews: () => void;
+  /** 打开某张表，并套用一个命名视图 */
+  openView: (table: string, view: string) => void;
+  /** 当前表正在用的视图名，侧栏据此高亮 */
+  currentView: string | null;
 }
 
 export const Ctx = createContext<AppCtx>(null!);
 export const useApp = () => useContext(Ctx);
 
-export function Tag({ value, color, dim }: { value: string; color?: string; dim?: boolean }) {
+export function Tag({ value, color, dim, hit }: { value: string; color?: string; dim?: boolean; hit?: boolean }) {
   const c = color || "gray";
   return (
     <span
-      className={cx("inline-flex h-[20px] max-w-full items-center rounded-[4px] px-1.5 text-[12px] leading-none whitespace-nowrap", dim && "opacity-50")}
+      className={cx("inline-flex h-[20px] max-w-full items-center rounded-[4px] px-1.5 text-[12px] leading-none whitespace-nowrap", dim && "opacity-50", hit && "ring-1 ring-accent")}
       style={{ background: `var(--opt-${c}-bg)`, color: `var(--opt-${c}-fg)` }}
     >
       <span className="truncate">{value}</span>

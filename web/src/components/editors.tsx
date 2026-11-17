@@ -119,7 +119,7 @@ function LongText({ value, onCommit, onCancel }: { value: unknown; onCommit: (v:
   );
 }
 
-function Options({ field: f, selected, multi, onPick }: { field: Field; selected: string[]; multi?: boolean; onPick: (v: string) => void }) {
+export function Options({ field: f, selected, multi, onPick }: { field: Field; selected: string[]; multi?: boolean; onPick: (v: string) => void }) {
   const [q, setQ] = useState("");
   const [active, setActive] = useState(0);
   const opts = (f.options ?? []).filter((o) => o.value.toLowerCase().includes(q.toLowerCase()));
@@ -159,7 +159,7 @@ function Options({ field: f, selected, multi, onPick }: { field: Field; selected
   );
 }
 
-function LinkPicker({ field: f, value, onCommit, onClose }: {
+export function LinkPicker({ field: f, value, onCommit, onClose }: {
   field: Field;
   value: unknown;
   onCommit: (v: unknown) => void | Promise<unknown>;

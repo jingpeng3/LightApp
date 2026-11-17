@@ -6,7 +6,7 @@ from dt.db import Tx, dumps
 from dt.errors import DtError, not_found
 from dt.fields import normalize
 from dt.model import Table, get_table, list_tables
-from dt.query import compile_sort, compile_where
+from dt.query import _column, compile_sort, compile_where
 
 SYSTEM = {
     "_id": "id", "_parent_id": "parent_id", "_version": "version",
@@ -291,7 +291,7 @@ def query(conn, table: Table, where=None, sort=None, limit=100, offset=0, includ
         raise DtError("invalid_query", "limit 要在 1 到 1000 之间")
     if offset < 0:
         raise DtError("invalid_query", "offset 不能是负数")
-    cond, params = compile_where(table, where or {})
+    cond, params = compile_where(table, where or {}, conn)
     if parent_id is not None:
         cond += " AND r.parent_id = ?"
         params.append(parent_id)
@@ -303,6 +303,63 @@ def query(conn, table: Table, where=None, sort=None, limit=100, offset=0, includ
     items = [to_output(table, r) for r in rows]
     _include_children(conn, table, items, parse_include(include))
     return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+FACET_TYPES = ("single_select", "multi_select", "person", "checkbox")
+FACET_SYSTEM = ("_created_by", "_updated_by")
+
+
+def facets(conn, table: Table, fields=None, where=None, parent_id=None, limit=50) -> dict:
+    """满足 where 的记录里，每个字段各个值有多少条。多选字段一条记录可以算进多个值；empty 是字段为空的条数。
+    fields 省略时统计全部单选、多选、人员和勾选字段。"""
+    if not 1 <= limit <= 500:
+        raise DtError("invalid_query", "limit 要在 1 到 500 之间")
+    keys = fields or [f.key for f in table.active_fields if f.type in FACET_TYPES]
+    cond, params = compile_where(table, where or {}, conn)
+    if parent_id is not None:
+        cond += " AND r.parent_id = ?"
+        params.append(parent_id)
+    base = f"FROM dt_records r WHERE r.table_id = ? AND {cond}"
+    out = {}
+    for key in keys:
+        expr, f = _column(table, key)
+        if (f is None and key not in FACET_SYSTEM) or (f is not None and f.type not in FACET_TYPES):
+            raise DtError("invalid_query", f"字段 {key} 不能统计取值", "支持单选、多选、人员、勾选字段，以及 _created_by、_updated_by")
+        if f is not None and f.is_array:
+            sql = (f"SELECT je.value AS v, COUNT(DISTINCT r.id) AS n FROM dt_records r, json_each(r.data, '$.{key}') je"
+                   f" WHERE r.table_id = ? AND {cond} GROUP BY je.value ORDER BY n DESC, v LIMIT ?")
+        else:
+            sql = f"SELECT {expr} AS v, COUNT(*) AS n {base} AND {expr} IS NOT NULL GROUP BY v ORDER BY n DESC, v LIMIT ?"
+        values = [{"value": bool(r["v"]) if f is not None and f.type == "checkbox" else r["v"], "count": r["n"]}
+                  for r in conn.execute(sql, (table.id, *params, limit))]
+        empty = conn.execute(f"SELECT COUNT(*) {base} AND {expr} IS NULL", (table.id, *params)).fetchone()[0]
+        out[key] = {"values": values, "empty": empty}
+    total = conn.execute(f"SELECT COUNT(*) {base}", (table.id, *params)).fetchone()[0]
+    return {"total": total, "fields": out}
+
+
+def search(conn, domain_id: int, q: str, tables=None, limit=5) -> dict:
+    """在域里所有表（含子表）上跑 $search，每张表给出命中总数和最近更新的 limit 条。"""
+    from dt.graph import _title  # graph 依赖 records
+
+    if not isinstance(q, str) or not q.strip():
+        raise DtError("invalid_query", "缺少搜索词 q")
+    if not 1 <= limit <= 50:
+        raise DtError("invalid_query", "limit 要在 1 到 50 之间")
+    groups = []
+    for table in list_tables(conn, domain_id):
+        if tables and table.name not in tables:
+            continue
+        cond, params = compile_where(table, {"$search": q}, conn)
+        base = f"FROM dt_records r WHERE r.table_id = ? AND {cond}"
+        total = conn.execute(f"SELECT COUNT(*) {base}", (table.id, *params)).fetchone()[0]
+        if not total:
+            continue
+        rows = conn.execute(f"SELECT r.* {base} ORDER BY r.updated_at DESC, r.id DESC LIMIT ?", (table.id, *params, limit)).fetchall()
+        items = [{"id": r["id"], "title": _title(table, json.loads(r["data"]), r["id"]), "parent_id": r["parent_id"],
+                  "record": to_output(table, r)} for r in rows]
+        groups.append({"table": table.name, "total": total, "items": items})
+    return {"q": q, "groups": groups}
 
 
 DOMAIN_OPS = ("create_domain", "alter_domain", "drop_domain")

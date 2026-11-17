@@ -10,6 +10,7 @@ const MAX = 200;
 const VERB: Record<Change["op"], string> = {
   insert: "新建", update: "修改", delete: "删除", create_table: "建表", alter_table: "改表结构", drop_table: "删表",
   create_domain: "新建域", alter_domain: "修改域", drop_domain: "删除域",
+  create_view: "新建视图", alter_view: "修改视图", drop_view: "删除视图",
 };
 
 /** 右侧实时动态流。暂停时新事件先攒着，恢复后一次放出来。 */
