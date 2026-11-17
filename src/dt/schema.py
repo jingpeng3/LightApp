@@ -587,6 +587,7 @@ def delete_tables(tx: Tx, tables: list[Table], counts: dict):
     for t in tables:
         tx.execute("DELETE FROM dt_records WHERE table_id = ?", (t.id,))
         tx.execute("DELETE FROM dt_counters WHERE table_id = ?", (t.id,))
+        tx.execute("DELETE FROM dt_views WHERE table_id = ?", (t.id,))
         tx.execute("DELETE FROM dt_fields WHERE table_id = ?", (t.id,))
         tx.execute("DELETE FROM dt_tables WHERE id = ?", (t.id,))
         tx.log(t.name, None, "drop_table", {"record_count": counts[t.name]}, None)

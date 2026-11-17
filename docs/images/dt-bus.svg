@@ -1,0 +1,129 @@
+<svg viewBox="0 0 1200 700" xmlns="http://www.w3.org/2000/svg" width="1200" height="700" role="img" aria-label="dt 共享数据总线：人和多个 Agent 都能读写，数据变化通过事件唤醒其他 Agent">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7c5cff"/>
+    </marker>
+    <marker id="arrowGray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="700" fill="#f8fafc"/>
+
+  <text x="40" y="46" font-family="PingFang SC, Noto Sans CJK SC, Microsoft YaHei, sans-serif" font-size="24" font-weight="700" fill="#0f172a">dt：一份共享数据，人和 Agent 互相驱动</text>
+
+  <!-- legend -->
+  <g font-family="PingFang SC, Noto Sans CJK SC, Microsoft YaHei, sans-serif" font-size="12.5" fill="#64748b">
+    <line x1="40" y1="74" x2="72" y2="74" stroke="#7c5cff" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="82" y="78">向下写入</text>
+    <line x1="156" y1="80" x2="156" y2="64" stroke="#7c5cff" stroke-width="2" stroke-dasharray="5 5" marker-end="url(#arrow)"/>
+    <text x="168" y="78">向上被事件唤醒</text>
+    <text x="296" y="78" fill="#94a3b8">（每条连线都是双向的：谁都能写，谁订阅谁被叫醒）</text>
+  </g>
+
+  <!-- actors -->
+  <g font-family="PingFang SC, Noto Sans CJK SC, Microsoft YaHei, sans-serif">
+    <g>
+      <rect x="60" y="110" width="180" height="84" rx="10" fill="#eef1f5" stroke="#9aa6b2" stroke-width="1.5"/>
+      <text x="150" y="146" text-anchor="middle" font-size="16" font-weight="700" fill="#1f2937">人</text>
+      <text x="150" y="170" text-anchor="middle" font-size="12" fill="#5b6472">看板 / 表格 / 拍板</text>
+    </g>
+    <g>
+      <rect x="290" y="110" width="180" height="84" rx="10" fill="#eaf6ee" stroke="#7fbf9a" stroke-width="1.5"/>
+      <text x="380" y="146" text-anchor="middle" font-size="16" font-weight="700" fill="#1f2937">Agent A</text>
+      <text x="380" y="170" text-anchor="middle" font-size="12" fill="#4b6b58">读 · 写 · 订阅</text>
+    </g>
+    <g>
+      <rect x="520" y="110" width="180" height="84" rx="10" fill="#eaf6ee" stroke="#7fbf9a" stroke-width="1.5"/>
+      <text x="610" y="146" text-anchor="middle" font-size="16" font-weight="700" fill="#1f2937">Agent B</text>
+      <text x="610" y="170" text-anchor="middle" font-size="12" fill="#4b6b58">读 · 写 · 订阅</text>
+    </g>
+    <g>
+      <rect x="750" y="110" width="180" height="84" rx="10" fill="#eaf6ee" stroke="#7fbf9a" stroke-width="1.5"/>
+      <text x="840" y="146" text-anchor="middle" font-size="16" font-weight="700" fill="#1f2937">Agent C</text>
+      <text x="840" y="170" text-anchor="middle" font-size="12" fill="#4b6b58">读 · 写 · 订阅</text>
+    </g>
+    <g>
+      <rect x="980" y="110" width="180" height="84" rx="10" fill="#eaf6ee" stroke="#7fbf9a" stroke-width="1.5"/>
+      <text x="1070" y="146" text-anchor="middle" font-size="16" font-weight="700" fill="#1f2937">Agent × N</text>
+      <text x="1070" y="170" text-anchor="middle" font-size="12" fill="#4b6b58">任何人都可以</text>
+    </g>
+  </g>
+
+  <!-- bidirectional spokes -->
+  <g stroke="#7c5cff" stroke-width="2" fill="none" stroke-linecap="round">
+    <path d="M134 194 V298" marker-end="url(#arrow)"/>
+    <path d="M166 298 V200" stroke-dasharray="5 5" opacity="0.75" marker-end="url(#arrow)"/>
+    <path d="M364 194 V298" marker-end="url(#arrow)"/>
+    <path d="M396 298 V200" stroke-dasharray="5 5" opacity="0.75" marker-end="url(#arrow)"/>
+    <path d="M594 194 V298" marker-end="url(#arrow)"/>
+    <path d="M626 298 V200" stroke-dasharray="5 5" opacity="0.75" marker-end="url(#arrow)"/>
+    <path d="M824 194 V298" marker-end="url(#arrow)"/>
+    <path d="M856 298 V200" stroke-dasharray="5 5" opacity="0.75" marker-end="url(#arrow)"/>
+    <path d="M1054 194 V298" marker-end="url(#arrow)"/>
+    <path d="M1086 298 V200" stroke-dasharray="5 5" opacity="0.75" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- shared data bus -->
+  <g font-family="PingFang SC, Noto Sans CJK SC, Microsoft YaHei, sans-serif">
+    <rect x="60" y="304" width="1100" height="140" rx="14" fill="#fff6ea" stroke="#e3b07a" stroke-width="1.5"/>
+    <text x="90" y="340" font-size="17" font-weight="700" fill="#7a4a12">dt 共享事实层</text>
+    <text x="90" y="362" font-size="12" fill="#9a7a55">同一份数据，不是消息队列；也没有中心调度</text>
+    <g>
+      <rect x="90" y="382" width="230" height="40" rx="8" fill="#fffdf8" stroke="#eccfa8"/>
+      <text x="205" y="407" text-anchor="middle" font-size="13" fill="#6b4a25">动态表格</text>
+      <rect x="340" y="382" width="230" height="40" rx="8" fill="#fffdf8" stroke="#eccfa8"/>
+      <text x="455" y="407" text-anchor="middle" font-size="13" fill="#6b4a25">知识图谱</text>
+      <rect x="590" y="382" width="230" height="40" rx="8" fill="#fffdf8" stroke="#eccfa8"/>
+      <text x="705" y="407" text-anchor="middle" font-size="13" fill="#6b4a25">事件绑定</text>
+      <rect x="840" y="382" width="230" height="40" rx="8" fill="#fffdf8" stroke="#eccfa8"/>
+      <text x="955" y="407" text-anchor="middle" font-size="13" fill="#6b4a25">收件箱</text>
+    </g>
+  </g>
+
+  <!-- mechanism strip -->
+  <g font-family="PingFang SC, Noto Sans CJK SC, Microsoft YaHei, sans-serif">
+    <text x="60" y="490" font-size="13" font-weight="600" fill="#64748b">一次写入之后，这一圈会自动转起来</text>
+
+    <g>
+      <rect x="125" y="506" width="200" height="84" rx="10" fill="#ffffff" stroke="#cfd8e3" stroke-width="1.5"/>
+      <text x="147" y="538" font-size="13" fill="#94a3b8">①</text>
+      <text x="166" y="538" font-size="15" font-weight="700" fill="#1f2937">写入</text>
+      <text x="166" y="560" font-size="11.5" fill="#64748b">记录 / 字段 / 附件</text>
+
+      <rect x="375" y="506" width="200" height="84" rx="10" fill="#ffffff" stroke="#cfd8e3" stroke-width="1.5"/>
+      <text x="397" y="538" font-size="13" fill="#94a3b8">②</text>
+      <text x="416" y="538" font-size="15" font-weight="700" fill="#1f2937">变化</text>
+      <text x="416" y="560" font-size="11.5" fill="#64748b">表更新 · 图成边</text>
+
+      <rect x="625" y="506" width="200" height="84" rx="10" fill="#ffffff" stroke="#cfd8e3" stroke-width="1.5"/>
+      <text x="647" y="538" font-size="13" fill="#94a3b8">③</text>
+      <text x="666" y="538" font-size="15" font-weight="700" fill="#1f2937">触发</text>
+      <text x="666" y="560" font-size="11.5" fill="#64748b">条件满足发事件</text>
+
+      <rect x="875" y="506" width="200" height="84" rx="10" fill="#ffffff" stroke="#cfd8e3" stroke-width="1.5"/>
+      <text x="897" y="538" font-size="13" fill="#94a3b8">④</text>
+      <text x="916" y="538" font-size="15" font-weight="700" fill="#1f2937">唤醒</text>
+      <text x="916" y="560" font-size="11.5" fill="#64748b">订阅者接着做</text>
+    </g>
+
+    <g stroke="#94a3b8" stroke-width="1.6" fill="none">
+      <path d="M327 548 H372" marker-end="url(#arrowGray)"/>
+      <path d="M577 548 H622" marker-end="url(#arrowGray)"/>
+      <path d="M827 548 H872" marker-end="url(#arrowGray)"/>
+    </g>
+
+    <path d="M975 590 V612 Q975 620 967 620 H233 Q225 620 225 612 V592" fill="none" stroke="#9d8bff" stroke-width="1.6" stroke-dasharray="5 5" marker-end="url(#arrow)"/>
+    <text x="600" y="640" text-anchor="middle" font-size="11.5" fill="#7c5cff">再写入</text>
+  </g>
+
+  <!-- bottom notes -->
+  <g font-family="PingFang SC, Noto Sans CJK SC, Microsoft YaHei, sans-serif" font-size="12" fill="#475569">
+    <circle cx="66" cy="668" r="4" fill="#38bdf8"/>
+    <text x="78" y="672">没有固定角色：任何 Agent 都能读、能写、能订阅</text>
+    <circle cx="446" cy="668" r="4" fill="#8b5cf6"/>
+    <text x="458" y="672">Agent 之间不直连：靠数据变化传话，谁订阅谁被叫醒</text>
+    <circle cx="826" cy="668" r="4" fill="#f59e0b"/>
+    <text x="838" y="672">人是其中一个：改一格和写一条记录等价</text>
+  </g>
+</svg>

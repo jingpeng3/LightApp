@@ -1,6 +1,6 @@
 ---
 name: dt-data
-description: 用 dt CLI 读写动态表格里的数据：先查域、再按描述挑表、看字段说明，然后查询、插入（含子表嵌套、批量）、更新、删除、挂附件（agent 产出物的绝对路径）、看变更历史、查记录之间的关联。用户说「记一条任务」「查一下进行中的任务」「把任务改成完成」「写一条日志」「把产出物挂到任务上」「看看某个项目里有什么数据」「这个任务关联了哪些东西」「谁引用了它」时使用。建域、建表、改字段用 dt-schema。
+description: 用 dt CLI 读写动态表格里的数据：先查域、再按描述挑表、看字段说明，然后查询、插入（含子表嵌套、批量）、更新、删除、挂附件（agent 产出物的绝对路径）、看变更历史、查记录之间的关联。用户说「记一条任务」「查一下进行中的任务」「搜一下哪里提到了压测」「用逾期视图看看」「把任务改成完成」「写一条日志」「把产出物挂到任务上」「看看某个项目里有什么数据」「这个任务关联了哪些东西」「谁引用了它」时使用。建域、建表、改字段用 dt-schema。
 ---
 
 # dt 数据操作
@@ -74,6 +74,22 @@ dt history -D proj_a --table task --id 12       # 这条记录的变更历史
 
 `--data`、`--set`、`--where` 都可以写 JSON 字符串、`@文件路径` 或 `-`（从 stdin 读）。内容复杂或含引号时写到文件里用 `@file.json`。查询语法见 [references/query.md](references/query.md)。
 
+### 搜索、统计和视图
+
+```bash
+dt search 压测 -D proj_a --format table                         # 整个域（含子表）里搜，按表分组
+dt rec query task -D proj_a --where '{"$search":"压测 p99"}'    # 只在一张表里搜，可以和其他条件一起写
+dt rec query task -D proj_a --where '{"$child":{"table":"task_log","where":{"level":"error"}}}'   # 日志里有 error 的任务
+dt rec facets task -D proj_a --fields status,owner             # 每个状态、每个负责人各有几条
+
+dt view list -D proj_a                                         # 人在页面上存的视图，agent 也能用
+dt rec query task -D proj_a --view 逾期 --where '{"owner":"claude"}'   # 套用视图，再叠加条件
+dt view save task 逾期 -D proj_a -A claude --where '{"due":{"lt":"$today"},"status":{"ne":"完成"}}'
+```
+
+- 用户说「我的视图」「逾期那个视图」时，先 `dt view list` 找名字，再 `--view` 套用，不要自己重写条件。
+- 不确定数据落在哪张表时先 `dt search`，再到命中的表里精确查询。
+
 ### 5. 查关联（需要时）
 
 记录之间的关系有三种：父子（`_parent_id`）、link 字段，以及同值关联（表结构里声明了同一个 `config.match` 的字段值相同，由 dt-schema 设置，不用手动写）。`dt graph` 在整个域上沿这些关系查找，不用自己一层层 query。
@@ -138,6 +154,7 @@ dt event watch -D proj_a --table task --field status --op update --since 100 --t
 - 记录用 `_id` 定位。`_id` 从 insert 或 query 的返回里取，不要自己编；它只在自己的域里能访问到。
 - `_` 开头的是只读系统字段（`_id` `_parent_id` `_version` `_created_at` `_updated_at` `_created_by` `_updated_by`），可以用来查询和排序。
 - 人可能同时在页面上编辑同一条记录。先读后改时把读到的 `_version` 传给 `--if-version`；返回 `version_conflict` 时重新读取再决定。
+- 时间字段写带时区的 ISO 字符串最稳妥，如 `"2026-11-06T10:00:00+08:00"`；手上是 Unix 时间戳（秒或毫秒，带小数也行）就直接传，不用自己转。返回的 datetime 统一是 UTC，如 `"2026-11-06T02:00:00.000Z"`，给用户看时按需要换成本地时间。返回 `invalid_value` 时照 `hint` 里的写法改，不要换个格式再猜。
 - 附件只记录路径，不复制文件，所以要传最终位置的绝对路径，不要传临时文件。
 - 删除前先 `dt rec impact` 看清会级联删掉什么、会改掉哪些记录的引用；用户没明确要求删除时先确认。
 - 子表记录必须有父记录：用 `--parent`，或者嵌套在父记录里插入。

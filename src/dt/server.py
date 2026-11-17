@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.websockets import WebSocketDisconnect
 
-from dt import domains, events, files, graph, inbox, records, schema
+from dt import domains, events, files, graph, inbox, records, schema, views
 from dt.db import Database, dt_home
 from dt.errors import DtError
 from dt.model import bind_domain, get_domain, get_table, list_tables
@@ -40,6 +40,15 @@ class QueryBody(BaseModel):
     offset: int = 0
     include: str | None = None
     parent_id: int | None = None
+    view: str | None = None
+
+
+class FacetBody(BaseModel):
+    fields: list[str] | None = None
+    where: dict | None = None
+    parent_id: int | None = None
+    view: str | None = None
+    limit: int = 50
 
 
 class UpdateBody(BaseModel):
@@ -188,8 +197,47 @@ def create_app(db: Database | None = None, *, dispatcher: bool = True) -> FastAP
 
     @app.post(D + "/tables/{name}/query")
     def query(domain: str, name: str, body: QueryBody):
+        """view 是这张表上命名视图的名字：视图的条件和 where 同时满足，没传 sort 时用视图的排序。"""
+        args = body.model_dump()
+        view = args.pop("view")
         with db.read() as conn:
-            return ok(records.query(conn, table_of(conn, domain, name), **body.model_dump()))
+            table = table_of(conn, domain, name)
+            if view is not None:
+                args["where"], args["sort"] = views.merge(views.find(conn, table, view), args["where"], args["sort"])
+            return ok(records.query(conn, table, **args))
+
+    @app.post(D + "/tables/{name}/facets")
+    def facets(domain: str, name: str, body: FacetBody):
+        """满足条件的记录里，单选、多选、人员、勾选字段每个值各有多少条。"""
+        with db.read() as conn:
+            table = table_of(conn, domain, name)
+            where = body.where
+            if body.view is not None:
+                where, _ = views.merge(views.find(conn, table, body.view), where, None)
+            return ok(records.facets(conn, table, body.fields, where, body.parent_id, body.limit))
+
+    @app.get(D + "/search")
+    def search(domain: str, q: str = "", tables: str | None = None, limit: int = 5):
+        """全域搜索：每张表（含子表）的命中数和最近更新的几条。"""
+        with db.read() as conn:
+            return ok(records.search(conn, get_domain(conn, domain)["id"], q, _names(tables), limit))
+
+    @app.get(D + "/views")
+    def view_list(domain: str, table: str | None = None):
+        with db.read() as conn:
+            return ok(views.list_views(conn, get_domain(conn, domain)["id"], table))
+
+    @app.post(D + "/views")
+    def view_save(domain: str, body: dict, request: Request):
+        return ok(views.save(db, domain, body, actor=actor(request)))
+
+    @app.patch(D + "/views/{view_id}")
+    def view_update(domain: str, view_id: int, body: dict, request: Request):
+        return ok(views.update(db, domain, view_id, body, actor=actor(request)))
+
+    @app.delete(D + "/views/{view_id}")
+    def view_delete(domain: str, view_id: int, request: Request):
+        return ok(views.delete(db, domain, view_id, actor=actor(request)))
 
     @app.patch(D + "/tables/{name}/records/{record_id}")
     def update(domain: str, name: str, record_id: int, body: UpdateBody, request: Request):

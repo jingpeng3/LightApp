@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Field, FileStatuses, Rec, TableInfo } from "./api";
+import type { FileStatuses, Rec, TableInfo } from "./api";
 import { ACTOR, api, ApiError } from "./api";
 import { useChanges } from "./live";
 import { actorName, diffKeys, toast, toastError } from "./util";
@@ -9,24 +9,13 @@ export interface Flash {
   n: number;
 }
 
-/** 当前看的是哪一页、怎么排序、搜什么。分页、排序、搜索都在服务端做。 */
+/** 当前看的是哪一页、怎么排序、按什么筛。分页、排序、筛选都在服务端做。 */
 export interface View {
   page: number;
   pageSize: number;
   sort: string | null;
-  search: string;
-}
-
-// contains 在这些字段上是子串匹配；多选等数组字段的 contains 要求选项值精确匹配，不参与搜索
-const SEARCHABLE: Field["type"][] = ["text", "long_text", "url", "email", "person", "single_select"];
-
-/** 搜索框的文字转成查询条件：数字同时按 _id 匹配，其余在文本类字段里找子串。 */
-function searchWhere(table: TableInfo, search: string) {
-  const q = search.trim();
-  if (!q) return null;
-  const or: Record<string, unknown>[] = table.fields.filter((f) => SEARCHABLE.includes(f.type)).map((f) => ({ [f.key]: { contains: q } }));
-  if (/^\d+$/.test(q)) or.push({ _id: Number(q) });
-  return or.length ? { $or: or } : { _id: -1 };
+  where: Record<string, unknown> | null;
+  view: string | null; // 命名视图，条件由服务端叠加
 }
 
 /** 一张表（或某个父记录下的子表）的一页记录，跟随实时变更更新，并记录需要高亮的单元格。 */
@@ -35,7 +24,7 @@ export function useRecords(table: TableInfo, parentId: number | null | undefined
   const [rows, setRows] = useState<Rec[] | null>(null);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
-  // 不在当前页实时展示的新增数（翻到了后面的页、按其他列排序、或在搜索时）
+  // 不在当前页实时展示的新增数（翻到了后面的页、按其他列排序、或在筛选时）
   const [stale, setStale] = useState(0);
   const reqSeq = useRef(0);
   const [flashes, setFlashes] = useState<Record<string, Flash>>({});
@@ -47,15 +36,16 @@ export function useRecords(table: TableInfo, parentId: number | null | undefined
   rowsRef.current = rows;
   const hasFiles = table.fields.some((f) => f.type === "attachment");
 
-  const { page, pageSize, sort, search } = view;
-  const where = JSON.stringify(searchWhere(table, search));
-  // 实时插入的新记录只有在「第一页、默认按新到旧、没有搜索」时才直接出现在表格里
-  const liveHead = page === 0 && !sort && !search.trim();
+  const { page, pageSize, sort } = view;
+  const where = JSON.stringify(view.where);
+  const filtering = view.where !== null || view.view !== null;
+  // 实时插入的新记录只有在「第一页、默认按新到旧、没有筛选」时才直接出现在表格里
+  const liveHead = page === 0 && !sort && !filtering;
 
   const load = useCallback(() => {
     const n = ++reqSeq.current;
     setLoading(true);
-    api.query(name, { where: JSON.parse(where), sort: sort ?? "-_id", limit: pageSize, offset: page * pageSize, parent_id: parentId ?? null })
+    api.query(name, { where: JSON.parse(where), view: view.view, sort: sort ?? "-_id", limit: pageSize, offset: page * pageSize, parent_id: parentId ?? null })
       .then((r) => {
         if (n !== reqSeq.current) return; // 翻页太快时丢弃过期的响应
         setRows(r.items);
@@ -63,7 +53,7 @@ export function useRecords(table: TableInfo, parentId: number | null | undefined
         setStale(0);
       }, toastError)
       .finally(() => n === reqSeq.current && setLoading(false));
-  }, [name, parentId, where, sort, page, pageSize]);
+  }, [name, parentId, where, view.view, sort, page, pageSize]);
 
   useEffect(() => setRows(null), [name, parentId]);
 
@@ -135,8 +125,8 @@ export function useRecords(table: TableInfo, parentId: number | null | undefined
     } else if (c.op === "delete") {
       if (parentId != null && c.before?._parent_id !== parentId) return;
       if (!rowsRef.current?.some((r) => r._id === id)) {
-        // 删掉的是别的页上的记录：没有搜索时总数一定少一条，有搜索时不确定是否命中
-        if (search.trim()) setStale((n) => n + 1);
+        // 删掉的是别的页上的记录：没有筛选时总数一定少一条，有筛选时不确定是否命中
+        if (filtering) setStale((n) => n + 1);
         else setTotal((t) => Math.max(0, t - 1));
         return;
       }

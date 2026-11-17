@@ -5,7 +5,7 @@ import math
 import mimetypes
 import os
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 from dt.errors import DtError
@@ -20,6 +20,14 @@ UNIQUE_TYPES = ("text", "long_text", "number", "date", "datetime", "single_selec
 COLORS = ("blue", "green", "yellow", "orange", "red", "purple", "pink", "cyan", "gray")
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# 年月日之间可以用 - 或 /，月和日可以不补零；后面跟的时间部分交给 fromisoformat
+LOOSE_DATE_RE = re.compile(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(.*)$")
+NUMERIC_RE = re.compile(r"^-?\d+(\.\d+)?$")
+# 时间戳不小于它时按毫秒算：1e11 秒已经是 5138 年，1973 年以后的毫秒时间戳都比它大
+MS_THRESHOLD = 1e11
+EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+DATETIME_HINT = ' ISO 8601 时间，如 "2026-11-06T10:00:00+08:00"、"2026-11-06 10:00"（不带时区按服务所在时区），或 Unix 时间戳 1793930400（秒或毫秒）'
+DATE_HINT = '日期，如 "2026-11-06"；也可以写完整时间或 Unix 时间戳，按服务所在时区取日期'
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -45,15 +53,15 @@ def normalize(f: Field, value, *, conn=None, domain_id=None, actor=None, ts=None
     if t == "number":
         return _number(f, value)
     if t == "date":
-        if not isinstance(value, str) or not DATE_RE.match(value):
-            raise _bad(f, value, " YYYY-MM-DD 格式的日期")
         try:
-            date.fromisoformat(value)
+            return to_date(value)
         except ValueError:
-            raise _bad(f, value, " YYYY-MM-DD 格式的日期") from None
-        return value
+            raise _bad(f, value, DATE_HINT) from None
     if t == "datetime":
-        return _datetime(f, value)
+        try:
+            return to_datetime(value)
+        except ValueError:
+            raise _bad(f, value, DATETIME_HINT) from None
     if t == "checkbox":
         if isinstance(value, bool):
             return value
@@ -104,16 +112,43 @@ def _number(f: Field, value):
     return value
 
 
-def _datetime(f: Field, value):
-    if not isinstance(value, str):
-        raise _bad(f, value, " ISO 8601 时间")
+def parse_time(value) -> datetime:
+    """各种写法的时间转成带时区的 datetime：ISO 8601 字符串（日期可以用 / 分隔、不补零），
+    或 Unix 时间戳（数字或纯数字字符串，秒或毫秒，可以带小数）。不带时区的按服务所在时区。认不出来抛 ValueError。"""
+    if isinstance(value, bool):
+        raise ValueError(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if NUMERIC_RE.match(text):
+            value = float(text)
+        else:
+            m = LOOSE_DATE_RE.match(text)
+            if m:
+                text = f"{m[1]}-{int(m[2]):02d}-{int(m[3]):02d}{m[4]}"
+            dt = datetime.fromisoformat(text)
+            return dt if dt.tzinfo is not None else dt.astimezone()
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(value)
+    # 用 timedelta 而不是 fromtimestamp(value / 1000)，毫秒时间戳除以 1000 后的浮点误差会让 .123 变成 .122
+    unit = "milliseconds" if abs(value) >= MS_THRESHOLD else "seconds"
     try:
-        dt = datetime.fromisoformat(value)
-    except ValueError:
-        raise _bad(f, value, " ISO 8601 时间，如 2026-11-06T10:00:00+08:00") from None
-    if dt.tzinfo is None:
-        return dt.isoformat(timespec="seconds")
-    return dt.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        return EPOCH + timedelta(**{unit: value})
+    except OverflowError as e:
+        raise ValueError(value) from e
+
+
+def to_datetime(value) -> str:
+    """datetime 字段的存储格式：UTC，精确到毫秒，和 _created_at / _updated_at 一样，按字符串比较就是按时间先后。"""
+    return parse_time(value).astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def to_date(value) -> str:
+    """date 字段的存储格式 YYYY-MM-DD；给的是时间或时间戳时，取服务所在时区的那一天。"""
+    if isinstance(value, str):
+        m = LOOSE_DATE_RE.match(value.strip())
+        if m and not m[4]:
+            return date(int(m[1]), int(m[2]), int(m[3])).isoformat()
+    return parse_time(value).astimezone().date().isoformat()
 
 
 def _link(f: Field, value, conn, domain_id):

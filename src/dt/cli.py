@@ -25,6 +25,7 @@ event_app = typer.Typer(help="记录事件与订阅绑定", no_args_is_help=True
 inbox_app = typer.Typer(help="收件箱", no_args_is_help=True)
 graph_app = typer.Typer(help="知识图谱：记录之间的父子和 link 关联", no_args_is_help=True)
 domain_app = typer.Typer(help="域：一组表的命名空间", no_args_is_help=True)
+view_app = typer.Typer(help="命名视图：存下来的查询条件和排序", no_args_is_help=True)
 app.add_typer(domain_app, name="domain")
 app.add_typer(table_app, name="table")
 app.add_typer(field_app, name="field")
@@ -32,6 +33,7 @@ app.add_typer(rec_app, name="rec")
 app.add_typer(event_app, name="event")
 app.add_typer(inbox_app, name="inbox")
 app.add_typer(graph_app, name="graph")
+app.add_typer(view_app, name="view")
 
 
 def port() -> int:
@@ -325,15 +327,51 @@ def rec_query(
     offset: int = typer.Option(0, "--offset"),
     include: str = typer.Option(None, "--include"),
     parent: int = typer.Option(None, "--parent", help="只查某个父记录下的子记录"),
+    view: str = typer.Option(None, "--view", help="命名视图：先套用视图的条件和排序，--where 再叠加，--sort 覆盖"),
     fmt: str = typer.Option("json", "--format", help="json 或 table"),
 ):
     """按条件查询记录。"""
     body = {"where": load_json(where, "--where") if where else None, "sort": sort, "limit": limit,
-            "offset": offset, "include": include, "parent_id": parent}
+            "offset": offset, "include": include, "parent_id": parent, "view": view}
     resp = call("POST", f"{dpath(domain)}/tables/{table}/query", body=body)
     if fmt == "table" and resp.get("ok"):
         typer.echo(render_table(resp["data"]["items"]))
         typer.echo(f"({len(resp['data']['items'])} / {resp['data']['total']}，域 {domain})")
+        return
+    emit({"ok": resp.get("ok"), "domain": domain, **resp})
+
+
+@rec_app.command("facets")
+def rec_facets(
+    table: str,
+    domain: DomainOpt = None,
+    fields: str = typer.Option(None, "--fields", help="逗号分隔的字段 key；默认全部单选、多选、人员、勾选字段"),
+    where: str = typer.Option(None, "--where", "-w", help="只统计满足条件的记录"),
+    parent: int = typer.Option(None, "--parent"),
+    view: str = typer.Option(None, "--view"),
+    limit: int = typer.Option(50, "--limit", help="每个字段最多列出多少个值"),
+):
+    """按字段的取值分组计数，比如每个状态各有几条任务。"""
+    body = {"fields": [x.strip() for x in fields.split(",") if x.strip()] if fields else None,
+            "where": load_json(where, "--where") if where else None, "parent_id": parent, "view": view, "limit": limit}
+    run("POST", f"{dpath(domain)}/tables/{table}/facets", body=body, domain=domain)
+
+
+@app.command()
+def search(
+    q: str,
+    domain: DomainOpt = None,
+    tables: str = typer.Option(None, "--tables", help="只搜这些表，逗号分隔"),
+    limit: int = typer.Option(5, "--limit", help="每张表最多列出多少条"),
+    fmt: str = typer.Option("json", "--format", help="json 或 table"),
+):
+    """在整个域（含子表）里搜索，按表分组列出命中数和最近更新的记录。"""
+    resp = call("GET", f"{dpath(domain)}/search", params={k: v for k, v in {"q": q, "tables": tables, "limit": limit}.items() if v is not None})
+    if fmt == "table" and resp.get("ok"):
+        groups = resp["data"]["groups"]
+        rows = [{"table": g["table"], "_id": i["id"], "title": i["title"], "_parent_id": i["parent_id"]} for g in groups for i in g["items"]]
+        typer.echo(render_table(rows))
+        typer.echo("(" + ("、".join(f"{g['table']} {g['total']}" for g in groups) or "没有命中") + f"，域 {domain})")
         return
     emit({"ok": resp.get("ok"), "domain": domain, **resp})
 
@@ -592,6 +630,35 @@ def inbox_read_all(domain: DomainOpt = None, actor: ActorOpt = None):
 def inbox_delete(message_id: int, domain: DomainOpt = None, actor: ActorOpt = None):
     """删除一条收件箱消息。"""
     run("DELETE", f"{dpath(domain)}/inbox/{message_id}", domain=domain, actor=need_actor(actor))
+
+
+# ---------- view ----------
+
+@view_app.command("list")
+def view_list(domain: DomainOpt = None, table: str = typer.Option(None, "--table", help="只看某张表的视图")):
+    """列出视图。"""
+    run("GET", f"{dpath(domain)}/views", params={"table": table} if table else None, domain=domain)
+
+
+@view_app.command("save")
+def view_save(
+    table: str,
+    name: str,
+    domain: DomainOpt = None,
+    where: str = typer.Option(None, "--where", "-w", help="查询条件 JSON / @file / -；日期可以写 $today 这类相对值"),
+    sort: str = typer.Option(None, "--sort"),
+    description: str = typer.Option(None, "--description", help="这个视图看什么"),
+    actor: ActorOpt = None,
+):
+    """保存视图：同名视图存在时整体覆盖。之后用 dt rec query <表> --view <名字> 套用。"""
+    body = {"table": table, "name": name, "where": load_json(where, "--where") if where else None, "sort": sort, "description": description}
+    run("POST", f"{dpath(domain)}/views", body=body, domain=domain, actor=need_actor(actor))
+
+
+@view_app.command("delete")
+def view_delete(view_id: int, domain: DomainOpt = None, actor: ActorOpt = None):
+    """按 id 删除视图（id 从 dt view list 里取）。"""
+    run("DELETE", f"{dpath(domain)}/views/{view_id}", domain=domain, actor=need_actor(actor))
 
 
 # ---------- graph ----------
